@@ -33,12 +33,20 @@ jobs:
 
       - name: Install Subversion and git-svn
         run: |
-          # The runner preinstalls git from ppa:git-core/ppa, which is newer than the
-          # git version Ubuntu's git-svn package is built against, so apt cannot
-          # satisfy both. Drop the PPA and use the distro's matched git/git-svn pair.
+          set -euxo pipefail
+          # The runner preinstalls git from ppa:git-core/ppa (2.5x), but Ubuntu builds
+          # git-svn against the distro git (2.43) and pins `Depends: git (< 2.43.0-.)`,
+          # so apt cannot satisfy both. Removing the PPA is not enough on its own —
+          # the newer git stays installed and apt will not downgrade it implicitly —
+          # so pin git and git-man back to the distro version explicitly.
+          sudo rm -f /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.list \
+                     /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources
           sudo add-apt-repository --remove -y ppa:git-core/ppa || true
           sudo apt-get update
-          sudo apt-get install -y --allow-downgrades git git-svn subversion git-lfs
+          GIT_VER=$(apt-cache madison git | awk '/ubuntu\.com/ {print $3; exit}')
+          echo "pinning git to the distro version: ${GIT_VER}"
+          sudo apt-get install -y --allow-downgrades \
+            git="${GIT_VER}" git-man="${GIT_VER}" git-svn subversion git-lfs
 
       - name: Verify git-svn is usable
         run: |
