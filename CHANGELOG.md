@@ -9,7 +9,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [1.0.0] - 2026-08-05
 
-First public release.
+First public release. Not yet tagged: pushing a `v1.0.0` tag builds the Windows
+installer and opens a draft GitHub release.
 
 ### Added
 
@@ -93,5 +94,5 @@ inheritance of shared settings and optional parallel execution.
 - Re-derived history can require a force push when history rewriting (LFS or
   metadata stripping) is enabled. Safe before cutover only.
 
-[Unreleased]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/commits/main
+[1.0.0]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/releases
