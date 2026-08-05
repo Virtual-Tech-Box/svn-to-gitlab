@@ -43,7 +43,11 @@ jobs:
                      /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources
           sudo add-apt-repository --remove -y ppa:git-core/ppa || true
           sudo apt-get update
-          GIT_VER=$(apt-cache madison git | awk '/ubuntu\.com/ {print $3; exit}')
+          # With the PPA gone, the first madison entry is the newest distro version.
+          # Parsing by field rather than by URL: the runners resolve archives through
+          # a mirrorlist, so the source column is not reliably *.ubuntu.com.
+          GIT_VER=$(apt-cache madison git | awk -F'|' 'NR==1 {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
+          test -n "${GIT_VER}" || { echo "could not resolve a distro git version"; exit 1; }
           echo "pinning git to the distro version: ${GIT_VER}"
           sudo apt-get install -y --allow-downgrades \
             git="${GIT_VER}" git-man="${GIT_VER}" git-svn subversion git-lfs

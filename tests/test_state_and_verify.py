@@ -100,6 +100,21 @@ def test_latest_job_is_the_most_recent(store):
     assert store.latest_job("repo-a")["id"] == second
 
 
+def test_latest_job_is_deterministic_when_timestamps_collide(store, monkeypatch):
+    """Windows' clock advances in ~15 ms steps, so jobs share a created_at.
+
+    `latest_job` decides which job a `migrate` re-run resumes, so an ambiguous
+    ordering means resuming the wrong one and redoing hours of conversion.
+    """
+    import svn2gitlab.state as state_module
+
+    monkeypatch.setattr(state_module.time, "time", lambda: 1000.0)
+    ids = [store.create_job("mig", "repo-a") for _ in range(5)]
+
+    assert store.latest_job("repo-a")["id"] == ids[-1]
+    assert [j["id"] for j in store.list_jobs(repo="repo-a")] == list(reversed(ids))
+
+
 def test_concurrent_writes_do_not_corrupt_state(store):
     """The web UI writes progress from job threads while the API reads it."""
     job_id = store.create_job("mig", "repo-a")

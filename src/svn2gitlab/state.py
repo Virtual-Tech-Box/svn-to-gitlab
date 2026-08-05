@@ -220,20 +220,26 @@ class StateStore:
         row = self._conn().execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         return _job_row(row) if row else None
 
+    # Ties on created_at are not hypothetical: the Windows clock advances in ~15 ms
+    # steps, so two jobs created back to back share a timestamp. Ordering by rowid as
+    # well makes "the latest job" mean insertion order, which is what decides the job
+    # a `migrate` re-run resumes.
+    _JOB_ORDER = "ORDER BY created_at DESC, rowid DESC"
+
     def latest_job(self, repo: str) -> Optional[Dict[str, Any]]:
         row = self._conn().execute(
-            "SELECT * FROM jobs WHERE repo=? ORDER BY created_at DESC LIMIT 1", (repo,)
+            f"SELECT * FROM jobs WHERE repo=? {self._JOB_ORDER} LIMIT 1", (repo,)
         ).fetchone()
         return _job_row(row) if row else None
 
     def list_jobs(self, limit: int = 100, repo: Optional[str] = None) -> List[Dict[str, Any]]:
         if repo:
             rows = self._conn().execute(
-                "SELECT * FROM jobs WHERE repo=? ORDER BY created_at DESC LIMIT ?", (repo, limit)
+                f"SELECT * FROM jobs WHERE repo=? {self._JOB_ORDER} LIMIT ?", (repo, limit)
             ).fetchall()
         else:
             rows = self._conn().execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                f"SELECT * FROM jobs {self._JOB_ORDER} LIMIT ?", (limit,)
             ).fetchall()
         return [_job_row(r) for r in rows]
 
