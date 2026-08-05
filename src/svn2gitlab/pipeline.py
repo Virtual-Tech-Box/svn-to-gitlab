@@ -19,12 +19,14 @@ from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from .config import AuthorPolicy, MigrationConfig, ResolvedRepo, VerifyMode
+from .config import (AuthorPolicy, FastPath, MigrationConfig, ResolvedRepo,
+                     VerifyMode)
 from .convert.export import ExportResult, Exporter
 from .convert.git import Git
+from .convert.engine import build_mirror, resolve_engine
 from .convert.gitsvn import GitSvnMirror, FetchResult
-from .errors import (AbortedError, ConfigError, Svn2GitlabError, ToolMissingError,
-                     VerificationError)
+from .errors import (AbortedError, ConfigError, ConversionError, Svn2GitlabError,
+                     ToolMissingError, VerificationError)
 from .gitlab.api import GitLabClient
 from .gitlab.push import Publisher, PushResult
 from .logging_setup import get_logger
@@ -130,6 +132,7 @@ class MigrationPipeline:
         self._analysis: Optional[RepoAnalysis] = None
         self._authors: Optional[AuthorMap] = None
         self._acquisition: Optional[acquire_mod.Acquisition] = None
+        self._engine: Optional[str] = None
         self._current_stage = ""
 
     # -- shared components ---------------------------------------------------
@@ -210,13 +213,34 @@ class MigrationPipeline:
                         "publishing every ref the mirror holds", exc)
             return None, None
 
+    def local_repo_path(self) -> Optional[Path]:
+        """The local Subversion repository, if the acquisition stage produced one."""
+        if self._acquisition and self._acquisition.local_repo:
+            return Path(self._acquisition.local_repo)
+        stored = self.state.stage_result(self.job_id, "acquire") if self.job_id else None
+        if stored and stored.get("local_repo"):
+            return Path(str(stored["local_repo"]))
+        if self.repo.source.local_path:
+            return Path(self.repo.source.local_path)
+        if self.repo.local_repo_dir.is_dir():
+            return self.repo.local_repo_dir
+        return None
+
+    def engine(self) -> str:
+        if self._engine is None:
+            self._engine = resolve_engine(self.repo.convert.engine, self.tools,
+                                          has_local_repo=self.local_repo_path() is not None)
+            log.info("conversion engine: %s", self._engine)
+        return self._engine
+
     @property
-    def mirror(self) -> GitSvnMirror:
+    def mirror(self):
         if self._mirror is None:
             layout = self.analysis.layout
             if not layout.trunk and not layout.branches and not layout.tags:
                 layout = layout_for_source(self.svn, self.repo.source, self.source_url())
-            self._mirror = GitSvnMirror(
+            self._mirror = build_mirror(
+                engine=self.engine(),
                 tools=self.tools,
                 repo_dir=self.repo.mirror_dir,
                 source_url=self.convert_url(),
@@ -224,6 +248,9 @@ class MigrationPipeline:
                 convert=self.repo.convert,
                 source=self.repo.source,
                 authors_file=self.repo.authors_file,
+                authors=self._authors or AuthorMap.load(self.repo.authors_file),
+                local_repo=self.local_repo_path(),
+                uuid=self.analysis.repository_uuid,
                 cancel=self.cancel,
             )
         return self._mirror
@@ -378,11 +405,21 @@ class MigrationPipeline:
         problems: List[str] = []
         warnings: List[str] = []
 
-        required = ["git", "git-svn", "svn"]
-        for name in required:
+        for name in ("git", "svn"):
             info = getattr(self.tools, name.replace("-", "_"))
             if not info.available:
                 problems.append(f"{name}: {info.detail or 'not found'}")
+        # git-svn is only needed if that engine is the one that will run. The native
+        # engine needs svnadmin instead, and neither is universally present.
+        if not problems:
+            try:
+                engine = resolve_engine(
+                    self.repo.convert.engine, self.tools,
+                    has_local_repo=bool(self.repo.source.local_path)
+                    or self.repo.source.fast_path != FastPath.NONE)
+                self._engine = engine
+            except ConversionError as exc:
+                problems.append(str(exc))
         if self.repo.convert.lfs.enabled and not self.tools.git_lfs.available:
             problems.append(f"git-lfs: {self.tools.git_lfs.detail or 'not found'} "
                             "(required because convert.lfs.enabled is true)")
@@ -556,6 +593,7 @@ class MigrationPipeline:
             estimated_bytes=estimated,
             cancel=self.cancel,
             on_progress=self._progress,
+            require_local=self.engine() == "native",
         )
         self._acquisition = acquisition
         # The mirror must be rebuilt against the acquired URL.
@@ -579,7 +617,9 @@ class MigrationPipeline:
             head_revision=self.analysis.head_revision,
             on_progress=self._progress,
         )
-        return result.to_dict()
+        payload = result.to_dict()
+        payload["engine"] = self.engine()
+        return payload
 
     def _stage_export(self, outcome: MigrationOutcome) -> Dict[str, Any]:
         export = self.exporter.build(on_progress=self._progress)

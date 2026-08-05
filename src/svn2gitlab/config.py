@@ -89,6 +89,12 @@ class FastPath(str, Enum):
     NONE = "none"        # talk to the live server with git-svn directly
 
 
+class ConversionEngine(str, Enum):
+    AUTO = "auto"          # native where it can run, git-svn otherwise
+    NATIVE = "native"      # built-in dump -> fast-import converter; no Perl needed
+    GIT_SVN = "git-svn"    # the reference implementation
+
+
 class TagStyle(str, Enum):
     ANNOTATED = "annotated"
     LIGHTWEIGHT = "lightweight"
@@ -254,6 +260,10 @@ class LfsConfig(_Base):
 
 
 class ConvertConfig(_Base):
+    # Which converter turns Subversion history into Git objects. The native engine
+    # needs no Perl and is far faster; git-svn remains available as a fallback and
+    # is the only option when converting straight from a remote URL.
+    engine: ConversionEngine = ConversionEngine.AUTO
     default_branch: str = "main"
     # Strip the `git-svn-id:` trailer from commit messages in the pushed history.
     strip_svn_metadata: bool = True

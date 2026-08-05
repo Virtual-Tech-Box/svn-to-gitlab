@@ -59,10 +59,24 @@ class Acquisition:
         }
 
 
-def choose_strategy(source: SourceConfig, tools: ToolSet, head_revision: int) -> str:
-    """Resolve `fast_path: auto` into a concrete strategy."""
+def choose_strategy(source: SourceConfig, tools: ToolSet, head_revision: int,
+                    require_local: bool = False) -> str:
+    """Resolve `fast_path: auto` into a concrete strategy.
+
+    `require_local` is set by the native conversion engine, which reads an
+    `svnadmin dump` and therefore cannot work against a bare remote URL. In that
+    case "talk to the live server" is not an option and we mirror instead.
+    """
     requested = source.fast_path
     if requested == FastPath.NONE:
+        if require_local and not source.local_path:
+            raise SvnError(
+                "the native conversion engine needs a local repository, but "
+                "`fast_path: none` forbids making one",
+                "Set `fast_path: auto` so the repository is mirrored locally first, "
+                "or use `convert.engine: git-svn`, which can convert straight from a "
+                "remote URL.",
+            )
         return "direct"
     if requested == FastPath.HOTCOPY:
         return "hotcopy"
@@ -71,9 +85,16 @@ def choose_strategy(source: SourceConfig, tools: ToolSet, head_revision: int) ->
 
     if source.local_path:
         return "local"
-    if head_revision >= MIRROR_REVISION_THRESHOLD and (tools.svnsync.available or tools.svnrdump.available) \
+    if (require_local or head_revision >= MIRROR_REVISION_THRESHOLD) \
+            and (tools.svnsync.available or tools.svnrdump.available) \
             and tools.svnadmin.available:
         return "mirror"
+    if require_local:
+        raise SvnError(
+            "the native conversion engine needs a local copy of the repository, but "
+            "neither svnsync nor svnrdump is available to make one",
+            "Install a full Subversion client, or set `convert.engine: git-svn`.",
+        )
     return "direct"
 
 
@@ -86,9 +107,10 @@ def acquire(
     estimated_bytes: int = 0,
     cancel: Optional[Event] = None,
     on_progress: Optional[Callable[[float, str], None]] = None,
+    require_local: bool = False,
 ) -> Acquisition:
     """Make the history locally available and return the URL to convert from."""
-    strategy = choose_strategy(source, tools, head_revision)
+    strategy = choose_strategy(source, tools, head_revision, require_local=require_local)
     log.info("acquisition strategy: %s", strategy)
 
     if strategy == "direct":

@@ -9,6 +9,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- `git-svn` is no longer a hard requirement. `doctor` previously failed, and the
+  tool refused to run, on any machine whose Git build omits Perl — which is the
+  common case on Windows.
+- CI no longer reported success on Windows while the toolchain was unusable: the
+  tool-check step had `continue-on-error` set, so a missing `svn` **and** a missing
+  `git-svn` still produced a green build with every end-to-end test silently
+  skipped.
 - Incremental sync no longer refuses to push after the first migration. The
   non-empty-project guard, which exists to stop the tool overwriting an unrelated
   project, fired on the tool's own re-pushes and broke the entire sync workflow.
@@ -16,6 +23,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **A native conversion engine that does not need `git-svn` or Perl.** It reads an
+  `svnadmin dump` and writes a `git fast-import` stream, converting roughly an order
+  of magnitude faster than git-svn's one-round-trip-per-revision design. It is now
+  the default wherever a local repository is available (`convert.engine: auto`);
+  `git-svn` remains selectable and is still used for converting directly from a
+  remote URL. The engines are interchangeable — the suite asserts every branch and
+  tag has an identical Git tree object under both.
 - Push coverage: a GitLab-shaped REST API in front of `git http-backend` lets the
   tests run a real `git push` over the smart HTTP protocol and assert on what
   arrived — refs, a clean clone, the default branch, and protection ordering.

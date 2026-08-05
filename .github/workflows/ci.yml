@@ -93,17 +93,49 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
       - name: Install Subversion
-        run: choco install svn --no-progress -y
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install svn --no-progress -y
+          # Chocolatey edits the machine PATH, but this process inherited its
+          # environment before that happened, so svn.exe stays invisible for the rest
+          # of the job unless we publish the directory ourselves. Getting this wrong
+          # is what made the whole Windows job pass while the tool could not run.
+          $found = Get-ChildItem -Path @(
+              "${env:ProgramFiles}\*\bin\svn.exe",
+              "${env:ProgramFiles(x86)}\*\bin\svn.exe",
+              "C:\ProgramData\chocolatey\bin\svn.exe",
+              "C:\tools\*\bin\svn.exe"
+            ) -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $found) { throw "svn.exe was not found after installing Subversion" }
+          Write-Host "svn found at $($found.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $found.Directory.FullName
+
       - run: pip install -e ".[dev]"
-      # Not a failure gate: the runner's toolchain varies, and `doctor` is exactly
-      # the command that reports what is missing.
-      - name: Show detected tools
+
+      # A real gate. `doctor` exits non-zero when a required tool is missing, and a
+      # Windows job that cannot convert a repository must not report success.
+      # Note Windows deliberately has no git-svn here: the native engine needs only
+      # svn/svnadmin, so this also proves the tool works without Perl.
+      - name: Check the toolchain
         run: svn2gitlab doctor
-        continue-on-error: true
-      # End-to-end tests skip themselves where svn or git-svn is unavailable, so this
-      # always exercises at least the unit suite.
-      - run: pytest -v
+
+      - name: Confirm the end-to-end tests actually ran
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          pytest -v --junit-xml=results.xml
+          [xml]$results = Get-Content results.xml
+          $suite = $results.testsuites.testsuite
+          $ran = [int]$suite.tests - [int]$suite.skipped
+          Write-Host "ran $ran of $($suite.tests) tests ($($suite.skipped) skipped)"
+          # Guards against the failure this job used to hide: a green Windows build
+          # where every conversion test quietly skipped for want of a toolchain.
+          if ([int]$suite.skipped -gt 20) {
+            throw "too many skipped tests ($($suite.skipped)); the toolchain is probably incomplete"
+          }
 
   # Prove the frozen build still starts. A PyInstaller bundle can import cleanly in
   # CI and still fail at runtime on a missing hidden import, so it is smoke-tested.

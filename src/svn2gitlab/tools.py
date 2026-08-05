@@ -116,7 +116,14 @@ class ToolSet:
 def _install_hint(missing: Sequence[str]) -> str:
     hints = []
     for name in missing:
-        if name in ("git", "git-svn"):
+        if name == "git-svn":
+            hints.append(
+                "git-svn is optional: the native conversion engine needs only svnadmin. "
+                "Install it only if you must convert directly from a remote URL without "
+                "mirroring first - on Windows that means Git for Windows' standard "
+                "installer, since MinGit omits the Perl git-svn requires."
+            )
+        elif name == "git":
             hints.append(
                 "Install Git for Windows (full installer, not MinGit) from https://git-scm.com/download/win "
                 "- the standard installer includes Perl, which `git svn` requires."

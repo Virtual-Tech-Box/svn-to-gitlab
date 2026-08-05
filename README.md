@@ -64,11 +64,24 @@ anything that is not.
 
 | Tool | Needed for | Notes |
 | --- | --- | --- |
-| `git` + `git-svn` | Everything | **Use the standard Git for Windows installer, not MinGit.** `git-svn` is a Perl script and MinGit ships no Perl. |
-| `svn` | Everything | On a VisualSVN Server host this already exists in `C:\Program Files\VisualSVN Server\bin` — either add it to `PATH` or list the folder under `tool_dirs:`. |
-| `svnadmin`, `svnlook` | Local fast path, cutover lock | Present wherever VisualSVN Server is installed. |
+| `git` | Everything | Any reasonably recent build. No Perl required. |
+| `svn`, `svnadmin` | Everything | On a VisualSVN Server host these already exist in `C:\Program Files\VisualSVN Server\bin` — either add it to `PATH` or list the folder under `tool_dirs:`. |
 | `svnsync` / `svnrdump` | Mirroring a *remote* repository locally | Either will do; `svnsync` is preferred. |
 | `git-lfs` | Only if `convert.lfs.enabled` | |
+| `git-svn` | **Optional** | Only for `convert.engine: git-svn`. Not needed by the default engine. |
+
+### Conversion engines
+
+The default **native** engine reads an `svnadmin dump` and writes a `git fast-import`
+stream. It needs no Perl — which matters because many Windows Git builds ship
+without it — and it converts roughly an order of magnitude faster than `git svn`,
+which makes one server round trip per revision.
+
+`git-svn` remains available (`convert.engine: git-svn`) as the reference
+implementation and for converting straight from a remote URL without mirroring it
+locally first. The two are interchangeable: the test suite asserts that every branch
+and tag they produce has an **identical Git tree object**, so switching engines
+cannot change the published content.
 
 ---
 

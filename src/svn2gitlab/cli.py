@@ -132,25 +132,42 @@ def doctor(
 
     if _core_ready(tools):
         console.print("\n[green]This machine can run a migration.[/green]")
+        engines = []
+        if tools.svnadmin.available:
+            engines.append("native (no Perl needed, converts from a local dump)")
+        if tools.git_svn.available:
+            engines.append("git-svn (can convert straight from a remote URL)")
+        console.print(f"Conversion engine(s) available: {', '.join(engines)}.")
+        if not tools.git_svn.available:
+            console.print("[dim]git-svn is unavailable, so a remote URL will be mirrored "
+                          "locally before conversion. Nothing else changes.[/dim]")
+        if not tools.svnadmin.available:
+            console.print("[yellow]svnadmin is not available, so the native engine, the local "
+                          "fast path and the cutover lock are all unavailable.[/yellow]")
         if not tools.git_lfs.available:
             console.print("[yellow]Git LFS is not installed. Install it before migrating a "
                           "repository with large binaries.[/yellow]")
-        if not tools.svnadmin.available:
-            console.print("[yellow]svnadmin is not available, so the local fast path and the "
-                          "cutover lock are unavailable. Conversions will run over the "
-                          "network.[/yellow]")
         raise typer.Exit(code=0)
 
     console.print("\n[red]Required tools are missing.[/red]")
     from .tools import _install_hint
     missing = [i.name for i in tools.all() if not i.available and i.name in
-               ("git", "git-svn", "svn")]
+               ("git", "svn", "svnadmin", "git-svn")]
     console.print(_install_hint(missing))
     raise typer.Exit(code=1)
 
 
 def _core_ready(tools: ToolSet) -> bool:
-    return tools.git.available and tools.git_svn.available and tools.svn.available
+    """Enough to convert something.
+
+    git and an svn client are non-negotiable. Beyond that we need *an* engine:
+    svnadmin drives the native converter, git-svn drives the legacy one. Requiring
+    both was what made this tool look broken on any Windows box whose Git build
+    omits Perl.
+    """
+    if not (tools.git.available and tools.svn.available):
+        return False
+    return tools.svnadmin.available or tools.git_svn.available
 
 
 # --------------------------------------------------------------------------- #
@@ -229,6 +246,9 @@ authors:
   policy: generate                      # generate | strict
 
 convert:
+  # native  = built-in converter, no Perl needed, much faster (default where possible)
+  # git-svn = reference implementation; can convert straight from a remote URL
+  engine: auto                          # auto | native | git-svn
   default_branch: main
   strip_svn_metadata: true              # remove git-svn-id from published messages
   keep_revision_trailer: true           # keep `Svn-Revision: NNN` for traceability
