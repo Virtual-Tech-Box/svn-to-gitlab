@@ -1,0 +1,120 @@
+name: Bug report
+description: Something went wrong during a migration
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A migration problem is usually only reproducible with
+        the *shape* of your source repository, so the questions below matter more
+        than usual.
+
+        **Do not paste tokens or passwords.** Logs under `<workdir>/logs/` are
+        already redacted, but read them before attaching.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected in Git, and what you actually got.
+      placeholder: |
+        I expected the `release-2.x` branch to appear in GitLab, but only `main` was
+        pushed. The analyze report listed release-2.x under branches.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Which stage failed
+      options:
+        - preflight
+        - analyze
+        - authors
+        - acquire
+        - convert
+        - export
+        - push
+        - verify
+        - sync
+        - cutover
+        - not sure / no error, wrong output
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `svn2gitlab doctor`
+      description: Tells us your Git, git-svn and Subversion versions.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: "The relevant sections, with secrets removed. `svn2gitlab config -c your.yaml` prints it redacted for you."
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: layout
+    attributes:
+      label: Detected layout
+      description: "The `layout` section from `svn2gitlab analyze`, plus the repository's approximate revision count."
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: The error message and the surrounding log lines.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: svn2gitlab version
+      placeholder: "1.0.0 (from `svn2gitlab version`)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform running the tool
+      options:
+        - Windows Server 2019
+        - Windows Server 2022 or later
+        - Windows 10/11
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Subversion server
+      options:
+        - VisualSVN Server
+        - Apache mod_dav_svn
+        - svnserve
+        - svn+ssh
+        - Local repository on disk
+        - Hosted / other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: GitLab
+      options:
+        - gitlab.com (SaaS)
+        - Self-managed
+    validations:
+      required: true

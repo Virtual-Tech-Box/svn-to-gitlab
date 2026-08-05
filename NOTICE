@@ -1,0 +1,54 @@
+svn2gitlab
+Copyright 2026 Virtual Tech Box
+
+This product includes software developed at Virtual Tech Box.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+--------------------------------------------------------------------------------
+THIRD-PARTY SOFTWARE
+--------------------------------------------------------------------------------
+
+This project does not bundle Git or Subversion. It invokes whatever copies are
+installed on the host machine as separate processes. Those tools are distributed
+under their own licences:
+
+  * Git and git-svn        GNU General Public License, version 2
+                           https://git-scm.com/about/free-and-open-source
+  * Apache Subversion      Apache License, Version 2.0
+                           https://subversion.apache.org/license.html
+  * Git LFS                MIT License
+                           https://github.com/git-lfs/git-lfs/blob/main/LICENSE.md
+
+If you produce a distribution that embeds these tools (see the `-Vendor` option of
+installer/build.ps1), their licences apply to those embedded copies and their
+licence texts must be shipped alongside them.
+
+--------------------------------------------------------------------------------
+PYTHON DEPENDENCIES
+--------------------------------------------------------------------------------
+
+This project depends on the following packages, each under its own licence:
+
+  * pydantic          MIT
+  * PyYAML            MIT
+  * requests          Apache-2.0
+  * typer             MIT
+  * rich              MIT
+  * FastAPI           MIT
+  * uvicorn           BSD-3-Clause
+  * Jinja2            BSD-3-Clause
+  * python-multipart  Apache-2.0
+
+Run `pip-licenses` in an installed environment for the authoritative, versioned
+list for your build.

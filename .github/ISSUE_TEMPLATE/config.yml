@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Virtual-Tech-Box/svn-to-gitlab/security/advisories/new
+    about: Report privately. Please do not open a public issue for security problems.
+  - name: Migration procedure and troubleshooting
+    url: https://github.com/Virtual-Tech-Box/svn-to-gitlab/blob/main/docs/RUNBOOK.md
+    about: The runbook and README cover the common failures before you file an issue.

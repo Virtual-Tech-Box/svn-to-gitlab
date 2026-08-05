@@ -1,0 +1,30 @@
+# Build artefacts
+build/
+dist/
+*.egg-info/
+installer/vendor/
+
+# Environments
+.venv/
+.buildenv/
+__pycache__/
+*.py[cod]
+
+# Test and tooling output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Migration working state - never commit these: they contain repository content,
+# and authors.txt/state databases may carry personal data.
+svn2gitlab-work/
+*.db
+authors.txt
+migration.yaml
+!examples/*.yaml
+
+# GitHub Actions local runner / editor cruft
+.DS_Store
+*.swp
+.idea/
+.vscode/

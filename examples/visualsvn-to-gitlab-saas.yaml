@@ -1,0 +1,72 @@
+# VisualSVN Server (Windows Server 2019) -> GitLab SaaS
+#
+# The reference configuration for the common case: the tool runs ON the VisualSVN
+# Server host, so it reads the repository straight off local disk and can apply the
+# cutover lock.
+#
+# Before running:
+#   set GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+#   svn2gitlab doctor
+
+version: 1
+name: acme-core
+
+# Roughly 4x the repository size is needed here. Keep it off the volume holding the
+# live repository so a runaway conversion cannot fill the SVN server's disk.
+workdir: D:\svn2gitlab\work
+
+# VisualSVN keeps repositories under its Repositories folder. Point at the individual
+# repository directory - the one containing `format` and `db` - not the parent.
+source:
+  local_path: C:\Repositories\core
+  layout:
+    mode: auto
+  # Reading a live repository via file:// is safe for concurrent readers, so no
+  # copy is taken. Use `hotcopy` if you want the conversion isolated from ongoing
+  # commits at the cost of a full extra copy on disk.
+  fast_path: auto
+
+authors:
+  file: D:\svn2gitlab\authors.txt
+  default_domain: acme.com
+  # Switch to `strict` once authors.txt has been reviewed, so a new committer stops
+  # the migration rather than getting an invented address.
+  policy: generate
+
+convert:
+  default_branch: main
+  strip_svn_metadata: true
+  keep_revision_trailer: true
+  tag_style: annotated
+  generate_gitignore: true
+  lfs:
+    enabled: false          # turn on if the analysis reports large binaries
+
+target:
+  gitlab_url: https://gitlab.com
+  token: env:GITLAB_TOKEN
+  namespace: acme/legacy    # nested groups are created if missing
+  project: core
+  visibility: private
+  create_namespace: true
+  protect_default_branch: true
+
+verify:
+  mode: full
+  verify_all_branches: true
+  fail_on_mismatch: true
+
+sync:
+  enabled: true
+  interval_minutes: 60
+  lock_svn_on_cutover: true
+  lock_message: >-
+    This repository has been migrated to GitLab and is now read-only.
+    Please use https://gitlab.com/acme/legacy/core instead.
+  # The migration service account keeps write access so the final sync can run.
+  lock_exempt_users:
+    - svcmigration
+
+# VisualSVN ships the Subversion binaries but does not always put them on PATH.
+tool_dirs:
+  - C:\Program Files\VisualSVN Server\bin

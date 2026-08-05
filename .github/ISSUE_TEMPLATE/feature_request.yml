@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a capability this tool should have
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What migration problem are you hitting
+      description: >-
+        Describe the situation rather than the solution. The most useful requests
+        come from a real repository that will not migrate cleanly today.
+      placeholder: |
+        Our repository uses svn:externals pointing at a second internal SVN server.
+        The report flags them, but we have 200 of them and no way to plan the work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you are doing instead today
+      description: Manual steps, scripts, or another tool.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This is about migrating SVN to GitLab, not general Git tooling
+          required: true

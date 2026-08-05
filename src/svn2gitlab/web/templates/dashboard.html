@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>svn2gitlab</title>
+<style>
+:root {
+  --bg:#f6f8fa; --panel:#fff; --fg:#1b1f24; --muted:#5c6570; --line:#d8dee4;
+  --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --accent:#0969da; --accent-fg:#fff;
+  --code:#f0f3f6;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:#0d1117; --panel:#161b22; --fg:#e6edf3; --muted:#9198a1; --line:#30363d;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#316dca; --accent-fg:#fff;
+    --code:#0d1117;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+header{display:flex;align-items:center;gap:1rem;padding:.85rem 1.25rem;background:var(--panel);
+  border-bottom:1px solid var(--line);position:sticky;top:0;z-index:20;flex-wrap:wrap}
+header h1{font-size:1rem;margin:0;font-weight:650;letter-spacing:-.01em}
+header .spacer{flex:1}
+.badge{font-size:.75rem;padding:.15rem .5rem;border-radius:999px;border:1px solid var(--line);
+  color:var(--muted);white-space:nowrap}
+.badge.ok{color:var(--ok);border-color:currentColor}
+.badge.bad{color:var(--bad);border-color:currentColor}
+main{max-width:1180px;margin:0 auto;padding:1.25rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:1rem 1.15rem;margin-bottom:1rem}
+.card h2{font-size:.95rem;margin:0 0 .75rem;font-weight:650}
+.repo-head{display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap}
+.repo-head h3{margin:0;font-size:1.05rem;font-weight:650}
+.repo-meta{color:var(--muted);font-size:.82rem;margin-top:.15rem;word-break:break-all}
+.actions{display:flex;gap:.4rem;flex-wrap:wrap;margin-left:auto}
+button{font:inherit;font-size:.83rem;padding:.35rem .75rem;border-radius:6px;
+  border:1px solid var(--line);background:var(--panel);color:var(--fg);cursor:pointer}
+button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button.primary:hover:not(:disabled){opacity:.9;color:var(--accent-fg)}
+button.danger:hover:not(:disabled){border-color:var(--bad);color:var(--bad)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.stages{display:flex;gap:.35rem;margin-top:.85rem;flex-wrap:wrap}
+.stage{flex:1 1 90px;min-width:88px;border:1px solid var(--line);border-radius:6px;
+  padding:.35rem .5rem;background:var(--code)}
+.stage .n{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.stage .s{font-size:.82rem;font-weight:600;margin-top:.1rem}
+.stage.succeeded{border-color:var(--ok)} .stage.succeeded .s{color:var(--ok)}
+.stage.failed{border-color:var(--bad)} .stage.failed .s{color:var(--bad)}
+.stage.running{border-color:var(--accent)} .stage.running .s{color:var(--accent)}
+.stage.skipped .s{color:var(--muted)}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:.6rem}
+.bar>i{display:block;height:100%;background:var(--accent);transition:width .4s ease}
+.progress-line{font-size:.82rem;color:var(--muted);margin-top:.4rem}
+.err{color:var(--bad);font-size:.82rem;margin-top:.5rem;white-space:pre-wrap;
+  background:var(--code);padding:.5rem .65rem;border-radius:6px;border-left:3px solid var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.5rem;margin-top:.8rem}
+.kv{background:var(--code);border-radius:6px;padding:.45rem .6rem}
+.kv .k{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.kv .v{font-size:.9rem;font-weight:600;word-break:break-all}
+#log{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:.6rem .75rem;
+  height:300px;overflow:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:12px;line-height:1.5}
+#log div{white-space:pre-wrap;word-break:break-word}
+.lvl-ERROR{color:var(--bad)} .lvl-WARNING{color:var(--warn)} .lvl-DEBUG{color:var(--muted)}
+.log-head{display:flex;align-items:center;gap:.6rem;margin-bottom:.6rem;flex-wrap:wrap}
+.log-head label{font-size:.8rem;color:var(--muted);display:flex;align-items:center;gap:.3rem}
+.empty{color:var(--muted);padding:1.5rem;text-align:center}
+dialog{border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--fg);
+  max-width:520px;padding:1.25rem}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+dialog h3{margin:0 0 .5rem;font-size:1rem}
+dialog p{color:var(--muted);font-size:.86rem}
+dialog .opts{margin:.85rem 0;display:flex;flex-direction:column;gap:.4rem}
+dialog label{display:flex;gap:.45rem;align-items:center;font-size:.87rem}
+.right{display:flex;gap:.5rem;justify-content:flex-end;margin-top:1rem}
+a{color:var(--accent)}
+.scroll{overflow-x:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>svn2gitlab</h1>
+  <span class="badge" id="version"></span>
+  <span class="badge" id="tools">checking tools…</span>
+  <span class="spacer"></span>
+  <span class="badge" id="configpath"></span>
+  <button onclick="reloadConfig()">Reload config</button>
+</header>
+
+<main>
+  <div id="configerr" class="card" style="display:none;border-color:var(--bad)">
+    <h2 style="color:var(--bad)">Configuration problem</h2>
+    <div class="err" id="configerrtext"></div>
+  </div>
+
+  <div id="repos"></div>
+
+  <div class="card">
+    <div class="log-head">
+      <h2 style="margin:0">Activity log</h2>
+      <span class="spacer" style="flex:1"></span>
+      <label><input type="checkbox" id="follow" checked> follow</label>
+      <label><input type="checkbox" id="debug"> show debug</label>
+      <button onclick="document.getElementById('log').innerHTML=''">Clear</button>
+    </div>
+    <div id="log"></div>
+  </div>
+</main>
+
+<dialog id="confirm">
+  <h3 id="confirm-title"></h3>
+  <p id="confirm-body"></p>
+  <div class="opts" id="confirm-opts"></div>
+  <div class="right">
+    <button onclick="document.getElementById('confirm').close()">Cancel</button>
+    <button class="primary" id="confirm-go">Continue</button>
+  </div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const STAGES = ["preflight","analyze","authors","acquire","convert","export","push","verify"];
+let repos = [];
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { const body = await response.json(); detail = body.detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  const type = response.headers.get("content-type") || "";
+  return type.includes("json") ? response.json() : response.text();
+}
+
+function fmtTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString() : "–";
+}
+function fmtDuration(seconds) {
+  if (!seconds) return "–";
+  if (seconds < 60) return Math.round(seconds) + "s";
+  if (seconds < 3600) return (seconds / 60).toFixed(1) + "m";
+  return (seconds / 3600).toFixed(1) + "h";
+}
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"]/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+}
+
+async function loadMeta() {
+  const meta = await api("/api/meta");
+  $("version").textContent = "v" + meta.version;
+  $("configpath").textContent = meta.config_path || "no config file";
+  const missing = Object.values(meta.tools).filter(t => !t.available).map(t => t.name);
+  const core = ["git","git-svn","svn"].filter(n => missing.includes(n));
+  $("tools").textContent = core.length ? ("missing: " + core.join(", "))
+    : (missing.length ? ("optional missing: " + missing.join(", ")) : "tools ready");
+  $("tools").className = "badge " + (core.length ? "bad" : "ok");
+  if (meta.config_error) {
+    $("configerr").style.display = "";
+    $("configerrtext").textContent = meta.config_error;
+  } else {
+    $("configerr").style.display = "none";
+  }
+  return meta;
+}
+
+async function loadRepos() {
+  try {
+    repos = await api("/api/repositories");
+  } catch (e) {
+    $("repos").innerHTML = `<div class="card empty">${esc(e.message)}</div>`;
+    return;
+  }
+  if (!repos.length) {
+    $("repos").innerHTML = `<div class="card empty">No repositories configured.</div>`;
+    return;
+  }
+  const stageMap = {};
+  await Promise.all(repos.map(async r => {
+    try { stageMap[r.name] = await api(`/api/repositories/${encodeURIComponent(r.name)}/stages`); }
+    catch (e) { stageMap[r.name] = []; }
+  }));
+  $("repos").innerHTML = repos.map(r => renderRepo(r, stageMap[r.name] || [])).join("");
+}
+
+function renderRepo(repo, stages) {
+  const running = repo.running;
+  const busy = running && !running.finished;
+  const byName = Object.fromEntries(stages.map(s => [s.name, s]));
+
+  const stageCells = STAGES.map(name => {
+    const stage = byName[name];
+    const status = stage ? stage.status : "pending";
+    return `<div class="stage ${status}" title="${esc(stage?.message || stage?.error || "")}">
+      <div class="n">${name}</div><div class="s">${status}</div></div>`;
+  }).join("");
+
+  const job = repo.job;
+  const sync = repo.sync || {};
+  const report = repo.report;
+
+  const lastError = job && job.error ? `<div class="err">${esc(job.error)}</div>` : "";
+  const progress = busy ? `
+    <div class="bar"><i style="width:${Math.round((running.progress || 0) * 100)}%"></i></div>
+    <div class="progress-line"><strong>${esc(running.kind)}</strong> ·
+      ${esc(running.stage || "starting")} — ${esc(running.message || "")}
+      (${fmtDuration(running.elapsed)})</div>` : "";
+
+  const verifiedBadge = report && report.verified === true
+    ? `<span class="badge ok">verified</span>`
+    : (report && report.verified === false
+        ? `<span class="badge bad">${report.differences} difference(s)</span>` : "");
+
+  return `<div class="card">
+    <div class="repo-head">
+      <div>
+        <h3>${esc(repo.name)} ${verifiedBadge}</h3>
+        <div class="repo-meta">${esc(repo.source)} <span style="opacity:.5">→</span>
+          ${esc(repo.gitlab_url)}/${esc(repo.target)}</div>
+      </div>
+      <div class="actions">
+        <button ${busy ? "disabled" : ""} onclick="run('${esc(repo.name)}','analyze')">Analyze</button>
+        <button class="primary" ${busy ? "disabled" : ""}
+          onclick="confirmRun('${esc(repo.name)}','migrate')">Migrate</button>
+        <button ${busy ? "disabled" : ""} onclick="run('${esc(repo.name)}','sync')">Sync</button>
+        <button ${busy ? "disabled" : ""} onclick="run('${esc(repo.name)}','verify')">Verify</button>
+        <button class="danger" ${busy ? "disabled" : ""}
+          onclick="confirmRun('${esc(repo.name)}','cutover')">Cut over</button>
+        <button class="danger" ${busy ? "" : "disabled"} onclick="stop('${esc(repo.name)}')">Stop</button>
+        ${report ? `<button onclick="window.open('/api/repositories/${encodeURIComponent(repo.name)}/report','_blank')">Report</button>` : ""}
+      </div>
+    </div>
+    ${progress}
+    <div class="stages">${stageCells}</div>
+    <div class="grid">
+      <div class="kv"><div class="k">Last job</div><div class="v">${job ? esc(job.status) : "never run"}</div></div>
+      <div class="kv"><div class="k">Last SVN revision</div><div class="v">${sync.last_svn_rev ? "r" + sync.last_svn_rev : "–"}</div></div>
+      <div class="kv"><div class="k">Last sync</div><div class="v">${fmtTime(sync.last_sync_at)}</div></div>
+      <div class="kv"><div class="k">Last push</div><div class="v">${fmtTime(sync.last_push_at)}</div></div>
+      <div class="kv"><div class="k">Cutover</div><div class="v">${sync.cutover_at ? fmtTime(sync.cutover_at) : "not yet"}</div></div>
+      <div class="kv"><div class="k">Default branch</div><div class="v">${esc(repo.default_branch)}${repo.lfs ? " · LFS" : ""}</div></div>
+    </div>
+    ${lastError}
+  </div>`;
+}
+
+async function run(name, kind, options) {
+  try {
+    await api(`/api/repositories/${encodeURIComponent(name)}/run`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({kind, options: options || {}}),
+    });
+    loadRepos();
+  } catch (e) {
+    alert(`Could not start ${kind}: ${e.message}`);
+  }
+}
+
+async function stop(name) {
+  await api(`/api/repositories/${encodeURIComponent(name)}/stop`, {method: "POST"});
+  loadRepos();
+}
+
+function confirmRun(name, kind) {
+  const dialog = $("confirm");
+  const opts = $("confirm-opts");
+  if (kind === "migrate") {
+    $("confirm-title").textContent = `Migrate ${name}`;
+    $("confirm-body").textContent =
+      "Converts the Subversion history and pushes it to GitLab. Safe to interrupt: " +
+      "progress is saved and re-running resumes where it stopped.";
+    opts.innerHTML = `
+      <label><input type="checkbox" id="opt-dry"> Dry run (convert and verify locally, do not push)</label>
+      <label><input type="checkbox" id="opt-force"> Allow a non-fast-forward push</label>
+      <label><input type="checkbox" id="opt-fresh"> Start over instead of resuming</label>`;
+  } else {
+    $("confirm-title").textContent = `Cut over ${name}`;
+    $("confirm-body").textContent =
+      "Runs a final sync, makes the Subversion repository reject new commits, and verifies " +
+      "the result. Tell developers to switch to GitLab before continuing. The lock can be " +
+      "reversed with `svn2gitlab unlock`.";
+    opts.innerHTML = `
+      <label><input type="checkbox" id="opt-lock" checked> Make Subversion read-only</label>
+      <label><input type="checkbox" id="opt-verify" checked> Verify after the final sync</label>
+      <label><input type="checkbox" id="opt-dry"> Dry run (show what would happen)</label>`;
+  }
+  $("confirm-go").onclick = () => {
+    const options = kind === "migrate"
+      ? {dry_run: $("opt-dry").checked, force_push: $("opt-force").checked,
+         no_resume: $("opt-fresh").checked}
+      : {lock_svn: $("opt-lock").checked, verify: $("opt-verify").checked,
+         dry_run: $("opt-dry").checked};
+    dialog.close();
+    run(name, kind, options);
+  };
+  dialog.showModal();
+}
+
+async function reloadConfig() {
+  await api("/api/reload", {method: "POST"});
+  await loadMeta();
+  await loadRepos();
+}
+
+// -- log stream ------------------------------------------------------------
+function startLogs() {
+  const source = new EventSource("/api/logs/stream");
+  const pane = $("log");
+  source.onmessage = (event) => {
+    const entry = JSON.parse(event.data);
+    if (entry.level === "DEBUG" && !$("debug").checked) return;
+    const row = document.createElement("div");
+    row.className = "lvl-" + entry.level;
+    const stamp = new Date(entry.time * 1000).toLocaleTimeString();
+    row.textContent = `${stamp}  ${entry.level.padEnd(7)} ${entry.message}`;
+    pane.appendChild(row);
+    while (pane.childElementCount > 2000) pane.removeChild(pane.firstChild);
+    if ($("follow").checked) pane.scrollTop = pane.scrollHeight;
+  };
+  source.onerror = () => {
+    // EventSource reconnects on its own; surface only a one-line hint.
+    if (source.readyState === EventSource.CLOSED) setTimeout(startLogs, 3000);
+  };
+}
+
+loadMeta().then(loadRepos).then(startLogs);
+setInterval(loadRepos, 2500);
+</script>
+</body>
+</html>

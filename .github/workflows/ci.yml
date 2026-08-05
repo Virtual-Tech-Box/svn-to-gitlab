@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Full suite including real SVN -> Git conversions. Linux is the cheapest place to
+  # get git-svn and subversion installed, so it carries the version matrix.
+  test-linux:
+    name: Linux / Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install Subversion and git-svn
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y subversion git-svn git-lfs
+
+      - name: Install the package
+        run: pip install -e ".[dev]"
+
+      - name: Show detected tools
+        run: svn2gitlab doctor
+
+      - name: Run the test suite
+        run: pytest -v --cov=svn2gitlab --cov-report=term-missing
+
+  # The other platforms matter because the tool is used on Windows servers and
+  # developer Macs. One Python version each is enough to catch path, line-ending and
+  # process-handling differences.
+  test-macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Subversion and git-svn
+        run: brew install subversion git-svn git-lfs
+      - run: pip install -e ".[dev]"
+      - run: svn2gitlab doctor
+      - run: pytest -v
+
+  test-windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Subversion
+        run: choco install svn --no-progress -y
+      - run: pip install -e ".[dev]"
+      # Not a failure gate: the runner's toolchain varies, and `doctor` is exactly
+      # the command that reports what is missing.
+      - name: Show detected tools
+        run: svn2gitlab doctor
+        continue-on-error: true
+      # End-to-end tests skip themselves where svn or git-svn is unavailable, so this
+      # always exercises at least the unit suite.
+      - run: pytest -v
+
+  # Prove the frozen build still starts. A PyInstaller bundle can import cleanly in
+  # CI and still fail at runtime on a missing hidden import, so it is smoke-tested.
+  build-frozen:
+    name: Frozen build smoke test
+    runs-on: windows-latest
+    needs: [test-linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: pyinstaller installer/svn2gitlab.spec --noconfirm --clean
+      - name: Run the frozen binary
+        run: |
+          .\dist\svn2gitlab\svn2gitlab.exe version
+          .\dist\svn2gitlab\svn2gitlab.exe --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: svn2gitlab-windows-unsigned
+          path: dist/svn2gitlab/
+          retention-days: 14

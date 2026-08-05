@@ -1,0 +1,107 @@
+# Many projects in one remote SVN repository -> a self-managed GitLab
+#
+# Covers the awkward cases: no filesystem access to the SVN server, a repository
+# holding several projects that must become several GitLab projects, large binaries,
+# and a GitLab instance behind a corporate certificate authority.
+#
+#   set SVN_PASSWORD=...
+#   set GITLAB_TOKEN=...
+#   svn2gitlab analyze -c batch-remote-to-self-managed.yaml
+
+version: 1
+name: acme-batch
+workdir: /var/lib/svn2gitlab/work
+
+# Shared defaults. Note this section has no `url` of its own - each repository below
+# supplies its own subpath, and the settings here are inherited by all of them.
+source:
+  url: https://svn.acme.local/svn/allprojects
+  username: ACME\svcmigration
+  password: env:SVN_PASSWORD
+  # VisualSVN and many corporate Apache setups use a private or self-signed
+  # certificate.
+  trust_server_cert: true
+  layout:
+    mode: auto
+    # Never migrate build output, whatever the project.
+    ignore_paths: '^(.*/)?(build|bin|obj|node_modules|target)/'
+  # With no local access, mirror the repository here first (svnsync, resumable)
+  # rather than making git-svn do one network round trip per revision.
+  fast_path: auto
+
+authors:
+  file: /etc/svn2gitlab/authors.txt
+  default_domain: acme.com
+  policy: strict            # every author must be mapped before anything runs
+
+convert:
+  default_branch: main
+  strip_svn_metadata: true
+  tag_style: annotated
+  generate_gitignore: true
+  preserve_empty_dirs: true # some of these projects rely on empty drop-in folders
+  lfs:
+    enabled: false
+
+target:
+  gitlab_url: https://gitlab.acme.local
+  token: env:GITLAB_TOKEN
+  namespace: engineering/legacy
+  visibility: internal
+  create_namespace: true
+  protect_default_branch: true
+  # Trust the corporate CA rather than disabling verification.
+  ca_bundle: /etc/ssl/certs/acme-root-ca.pem
+
+verify:
+  mode: full
+  verify_all_branches: true
+  fail_on_mismatch: true
+
+sync:
+  enabled: true
+  interval_minutes: 120
+  # No filesystem access to the SVN server, so the lock cannot be applied from here.
+  # The cutover will say so; lock it manually on the server.
+  lock_svn_on_cutover: false
+
+# Two migrations run concurrently. Raise only if the SVN server and the disk can
+# take it - the bottleneck is usually one of those, not the CPU.
+parallelism: 2
+
+repositories:
+  - name: core
+    source: { subpath: core }
+    target: { project: core, description: "Core platform, migrated from Subversion" }
+
+  - name: tools
+    source: { subpath: tools }
+    target: { project: tools }
+
+  # Overrides merge key-wise, so this inherits every setting above and changes only
+  # what it names.
+  - name: assets
+    source: { subpath: assets }
+    target: { project: assets }
+    convert:
+      lfs:
+        enabled: true
+        size_threshold_mb: 25
+        extensions: [psd, ai, png, jpg, tiff, mp4, mov, zip, fbx]
+
+  # A project with a non-standard layout the detector should not have to guess.
+  - name: legacy-vb
+    source:
+      subpath: legacy/vb6
+      layout:
+        mode: custom
+        trunk: MAIN
+        branches: [DEV]
+        tags: [RELEASES]
+    target: { project: legacy-vb }
+
+  # Retired: kept in the file for the record, but skipped by every command.
+  - name: retired-prototype
+    enabled: false
+    source: { subpath: prototypes/old }
+    target: { project: retired-prototype }
