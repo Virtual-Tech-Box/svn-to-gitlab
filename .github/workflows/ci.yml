@@ -33,8 +33,17 @@ jobs:
 
       - name: Install Subversion and git-svn
         run: |
+          # The runner preinstalls git from ppa:git-core/ppa, which is newer than the
+          # git version Ubuntu's git-svn package is built against, so apt cannot
+          # satisfy both. Drop the PPA and use the distro's matched git/git-svn pair.
+          sudo add-apt-repository --remove -y ppa:git-core/ppa || true
           sudo apt-get update
-          sudo apt-get install -y subversion git-svn git-lfs
+          sudo apt-get install -y --allow-downgrades git git-svn subversion git-lfs
+
+      - name: Verify git-svn is usable
+        run: |
+          git --version
+          git svn --version
 
       - name: Install the package
         run: pip install -e ".[dev]"
