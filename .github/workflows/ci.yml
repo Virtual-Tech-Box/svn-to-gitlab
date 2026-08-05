@@ -133,7 +133,10 @@ jobs:
           Write-Host "ran $ran of $($suite.tests) tests ($($suite.skipped) skipped)"
           # Guards against the failure this job used to hide: a green Windows build
           # where every conversion test quietly skipped for want of a toolchain.
-          if ([int]$suite.skipped -gt 20) {
+          # Only the git-svn equivalence comparison should skip here: Windows has no
+          # git-svn, which is the point. If the conversion suite starts skipping too,
+          # the toolchain has regressed and the build must not be green.
+          if ([int]$suite.skipped -gt 5) {
             throw "too many skipped tests ($($suite.skipped)); the toolchain is probably incomplete"
           }
 

@@ -1,7 +1,8 @@
 """Shared fixtures.
 
 The end-to-end tests build a real Subversion repository and convert it. That needs
-svn, svnadmin, git and git-svn on the machine; where they are absent the tests skip
+git, an svn client, and a conversion engine - either svnadmin for the native
+converter or git-svn for the legacy one. Where those are absent the tests skip
 rather than fail, so the unit tests still run on a bare CI image.
 """
 
@@ -38,10 +39,21 @@ def svn_available(tools):
     return tools.svn.available and tools.svnadmin.available
 
 
+def _can_convert(tools) -> bool:
+    """Whether this machine can convert a repository at all.
+
+    Either engine will do: the native converter needs svnadmin, git-svn needs Perl.
+    Requiring git-svn here would skip the entire end-to-end suite on Windows, which
+    is precisely the platform the native engine exists to serve.
+    """
+    if not (tools.git.available and tools.svn.available):
+        return False
+    return tools.svnadmin.available or tools.git_svn.available
+
+
 @pytest.fixture(scope="session")
 def conversion_available(tools):
-    return (tools.svn.available and tools.svnadmin.available
-            and tools.git.available and tools.git_svn.available)
+    return _can_convert(tools)
 
 
 requires_svn = pytest.mark.skipif(
@@ -50,9 +62,8 @@ requires_svn = pytest.mark.skipif(
 )
 
 requires_conversion = pytest.mark.skipif(
-    not (detect_tools().svn.available and detect_tools().svnadmin.available
-         and detect_tools().git.available and detect_tools().git_svn.available),
-    reason="svn, svnadmin, git and git-svn are required",
+    not _can_convert(detect_tools()),
+    reason="git, svn and a conversion engine (svnadmin or git-svn) are required",
 )
 
 
