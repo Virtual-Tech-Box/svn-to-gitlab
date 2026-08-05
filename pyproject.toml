@@ -39,7 +39,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "pyinstaller>=6.5", "httpx2>=0.1"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pyinstaller>=6.5",
+    # starlette's TestClient needs an HTTP transport, and which one depends on the
+    # starlette version pip resolves: current releases require httpx2 (Python 3.10+),
+    # older ones require httpx. Declare both so the web tests run on every supported
+    # interpreter, including 3.9 where httpx2 is unavailable.
+    "httpx>=0.24",
+    "httpx2>=0.1; python_version >= '3.10'",
+]
 
 [project.scripts]
 svn2gitlab = "svn2gitlab.cli:main"

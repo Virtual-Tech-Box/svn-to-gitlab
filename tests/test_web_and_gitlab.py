@@ -196,7 +196,14 @@ def test_push_failures_are_explained(output, fragment):
 def web_client(migration_config):
     fastapi_testclient = pytest.importorskip("fastapi.testclient")
     from svn2gitlab.web.server import create_app
-    return fastapi_testclient.TestClient(create_app(migration_config))
+
+    try:
+        return fastapi_testclient.TestClient(create_app(migration_config))
+    except RuntimeError as exc:
+        # starlette imports fine but raises at construction when its HTTP transport
+        # (httpx or httpx2, depending on the starlette version) is absent. Skipping
+        # with the real reason beats a wall of identical stack traces.
+        pytest.skip(f"starlette TestClient is unusable in this environment: {exc}")
 
 
 def test_dashboard_page_is_served(web_client):
