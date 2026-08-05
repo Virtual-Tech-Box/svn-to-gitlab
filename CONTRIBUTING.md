@@ -65,6 +65,12 @@ commits. `test_stream_filter_is_deterministic` guards the message filter.
 something it was asked to do, it must say so in the report and the logs. Look at how
 `ExportResult.skipped` is populated.
 
+**Python 3.9 is the floor.** You are almost certainly developing on something much
+newer, where syntax that is a hard `SyntaxError` on 3.9 compiles silently — a
+backslash inside an f-string expression is the one that has already bitten us.
+`tests/test_compat.py` guards this; do not weaken it without raising
+`requires-python` too.
+
 ## Style
 
 Match the surrounding code rather than any external style guide. Concretely: type

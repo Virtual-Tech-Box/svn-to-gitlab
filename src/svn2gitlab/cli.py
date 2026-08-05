@@ -185,10 +185,20 @@ def init(
 
 
 def _starter_config(svn_url, svn_path, gitlab_url, namespace, project) -> str:
+    # Every interpolated value is computed here rather than inline: an f-string
+    # expression could not contain a backslash before Python 3.12, and the Windows
+    # path in the local_path example does.
+    url_line = f"url: {svn_url}" if svn_url else "# url: https://svn.example.com/svn/myrepo"
+    path_line = (f"local_path: {svn_path}" if svn_path
+                 else r"# local_path: C:\Repositories\myrepo")
+    namespace_line = f"namespace: {namespace}" if namespace else "# namespace: mygroup/subgroup"
+    project_line = f"project: {project}" if project else "# project: myproject"
+    name = project or "migration"
+
     return f"""# svn2gitlab migration configuration
 # Every value below can be overridden per repository in the `repositories:` list.
 version: 1
-name: {project or 'migration'}
+name: {name}
 
 # Working directory. Needs roughly 4x the size of the Subversion repository:
 # the git-svn mirror, the publishable export, and a temporary verification export.
@@ -198,8 +208,8 @@ source:
   # Use `url` for any remote repository, or `local_path` when this tool runs on the
   # Subversion server itself. `local_path` is dramatically faster and is required for
   # the cutover lock.
-  {'url: ' + svn_url if svn_url else '# url: https://svn.example.com/svn/myrepo'}
-  {'local_path: ' + svn_path if svn_path else r'# local_path: C:\Repositories\myrepo'}
+  {url_line}
+  {path_line}
   # username: DOMAIN\\svcmigration
   # password: env:SVN_PASSWORD          # env: / file: / keyring: indirection supported
   trust_server_cert: true               # VisualSVN commonly uses a self-signed certificate
@@ -233,8 +243,8 @@ convert:
 target:
   gitlab_url: {gitlab_url}
   token: env:GITLAB_TOKEN               # needs the `api` and `write_repository` scopes
-  {'namespace: ' + namespace if namespace else '# namespace: mygroup/subgroup'}
-  {'project: ' + project if project else '# project: myproject'}
+  {namespace_line}
+  {project_line}
   visibility: private
   create_namespace: true
   protect_default_branch: true
