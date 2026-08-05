@@ -7,6 +7,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- Incremental sync no longer refuses to push after the first migration. The
+  non-empty-project guard, which exists to stop the tool overwriting an unrelated
+  project, fired on the tool's own re-pushes and broke the entire sync workflow.
+  A push recorded in the state store now marks the project as ours to update.
+
+### Added
+
+- Push coverage: a GitLab-shaped REST API in front of `git http-backend` lets the
+  tests run a real `git push` over the smart HTTP protocol and assert on what
+  arrived — refs, a clean clone, the default branch, and protection ordering.
+
 ## [1.0.0] - 2026-08-05
 
 First public release. Not yet tagged: pushing a `v1.0.0` tag builds the Windows

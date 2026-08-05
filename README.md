@@ -337,8 +337,17 @@ pytest -m "not slow"      # unit tests only
 The end-to-end tests build a real Subversion repository — branches, tags, a
 modified-after-creation tag, a deleted branch, a binary file, a non-ASCII path,
 multiple authors including a domain-qualified one and an authorless revision — then
-convert it and assert on the resulting Git objects. They skip automatically where
-`svn` and `git-svn` are unavailable.
+convert it and assert on the resulting Git objects.
+
+The push is covered too: `tests/fake_gitlab.py` runs a GitLab-shaped REST API in
+front of `git http-backend`, so `git push` speaks the real smart HTTP protocol to a
+real bare repository. Those tests assert on what arrived on the server — the refs,
+a clean clone of the content, the default branch, and that protection is applied
+*after* the push rather than before. Not covered there: Git LFS uploads (which need
+an LFS batch API) and GitLab push rules, which remain rehearsal-only.
+
+All of these skip automatically where `svn`, `git-svn` or `git-http-backend` are
+unavailable.
 
 Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the setup and
 the four rules that matter here: verification must be able to fail, errors must carry

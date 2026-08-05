@@ -40,17 +40,49 @@ jobs:
         run: .\dist\svn2gitlab\svn2gitlab.exe version
 
       - name: Build the installer
-        run: |
-          & "$env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe" installer\svn2gitlab.iss
         shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # `$env:ProgramFiles(x86)` does not parse: a parenthesised name needs
+          # ${...}. Look the compiler up rather than hardcoding a path, and install
+          # it if the runner image ever stops shipping it.
+          $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+          if (-not $iscc) {
+            $candidates = @(
+              "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+              "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+            )
+            $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if (-not $found) {
+              Write-Host "Inno Setup not found on the image; installing it"
+              choco install innosetup --no-progress -y
+              $found = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            }
+            if (-not $found) { throw "Inno Setup 6 could not be located or installed" }
+            $iscc = $found
+          }
+          Write-Host "using $iscc"
+          & $iscc installer\svn2gitlab.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
       - name: Package the portable build
-        run: Compress-Archive -Path dist\svn2gitlab\* -DestinationPath dist\svn2gitlab-portable-windows-x64.zip
         shell: pwsh
+        run: Compress-Archive -Path dist\svn2gitlab\* -DestinationPath dist\svn2gitlab-portable-windows-x64.zip
+
+      - name: Verify the artifacts exist
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $setup = Get-ChildItem dist\svn2gitlab-setup-*.exe -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "no installer was produced" }
+          $zip = Get-Item dist\svn2gitlab-portable-windows-x64.zip
+          Write-Host ("installer: {0} ({1:N1} MB)" -f $setup.Name, ($setup.Length / 1MB))
+          Write-Host ("portable:  {0} ({1:N1} MB)" -f $zip.Name, ($zip.Length / 1MB))
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-release
+          if-no-files-found: error
           path: |
             dist/svn2gitlab-setup-*.exe
             dist/svn2gitlab-portable-windows-x64.zip
@@ -72,16 +104,28 @@ jobs:
           pip install build
           python -m build
 
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum svn2gitlab-setup-*.exe svn2gitlab-portable-windows-x64.zip \
+                    *.whl *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Create the release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
+          # Published, not draft: a draft is invisible on the public releases page,
+          # so the artifacts would appear to be missing. The build only reaches this
+          # step after the tests and the installer build have passed.
+          draft: false
           generate_release_notes: true
+          fail_on_unmatched_files: true
           files: |
             dist/svn2gitlab-setup-*.exe
             dist/svn2gitlab-portable-windows-x64.zip
             dist/*.whl
             dist/*.tar.gz
+            dist/SHA256SUMS.txt
           body: |
             ## Install
 
@@ -93,7 +137,7 @@ jobs:
             Then run `svn2gitlab doctor` to check for Git, git-svn and Subversion.
 
             > The Windows binaries are **not code-signed**. SmartScreen will warn on
-            > first run. Verify the checksums below against the build log if that
-            > matters in your environment.
+            > first run. `SHA256SUMS.txt` is attached, and the values are printed in
+            > the build log for this release if you want to check them independently.
 
             See [docs/RUNBOOK.md](docs/RUNBOOK.md) for the migration procedure.

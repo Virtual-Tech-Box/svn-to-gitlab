@@ -79,7 +79,8 @@ class Publisher:
 
     # -- preflight -----------------------------------------------------------
 
-    def preflight(self, default_branch: str, lfs_enabled: bool) -> Dict[str, object]:
+    def preflight(self, default_branch: str, lfs_enabled: bool,
+                  allow_existing: bool = False) -> Dict[str, object]:
         """Everything that can be checked before a single byte is uploaded."""
         access = self.client.check_access()
         checks: Dict[str, object] = {"access": access, "warnings": [], "blockers": []}
@@ -114,7 +115,8 @@ class Publisher:
 
         existing = self.client.find_project(self.target.full_path())
         checks["project_exists"] = bool(existing)
-        if existing and not existing.empty_repo and not self.target.allow_non_empty_project:
+        if existing and not existing.empty_repo and not self.target.allow_non_empty_project \
+                and not allow_existing:
             checks["blockers"].append(  # type: ignore[union-attr]
                 f"project {existing.path_with_namespace} already contains commits"
             )
@@ -134,6 +136,7 @@ class Publisher:
         branches: Sequence[str] = (),
         tags: Sequence[str] = (),
         force: bool = False,
+        allow_existing: bool = False,
         on_progress: Optional[Callable[[float, str], None]] = None,
     ) -> PushResult:
         def step(fraction: float, message: str) -> None:
@@ -141,7 +144,8 @@ class Publisher:
                 on_progress(fraction, message)
 
         step(0.02, "resolving the GitLab project")
-        project = self.client.ensure_project(self.target, default_branch, lfs_enabled)
+        project = self.client.ensure_project(self.target, default_branch, lfs_enabled,
+                                             allow_existing=allow_existing)
         result = PushResult(
             project_path=project.path_with_namespace,
             project_url=project.web_url,

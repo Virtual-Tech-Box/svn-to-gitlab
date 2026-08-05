@@ -591,9 +591,11 @@ class MigrationPipeline:
         git = Git(self.tools, self.repo.export_dir, cancel=self.cancel)
         publisher = Publisher(self.gitlab, self.repo.target, git, cancel=self.cancel)
 
+        previously_pushed = self.already_published()
         self._progress(0.02, "running push preflight checks")
         checks = publisher.preflight(self.repo.convert.default_branch,
-                                     self.repo.convert.lfs.enabled)
+                                     self.repo.convert.lfs.enabled,
+                                     allow_existing=previously_pushed)
         blockers = checks.get("blockers") or []
         if blockers:
             raise Svn2GitlabError("GitLab preflight failed:\n  - " + "\n  - ".join(blockers),  # type: ignore[arg-type]
@@ -608,6 +610,7 @@ class MigrationPipeline:
                 branches=[m.name for m in export.branches],
                 tags=[m.name for m in export.tags],
                 force=force,
+                allow_existing=previously_pushed,
                 on_progress=self._progress,
             )
         finally:
@@ -690,6 +693,16 @@ class MigrationPipeline:
         self._exporter = None  # re-derive from scratch so the result is reproducible
         return self.exporter.build(on_progress=on_progress)
 
+    def already_published(self) -> bool:
+        """True when this migration has previously pushed to the target project.
+
+        The non-empty-project guard exists to stop us writing over somebody else's
+        repository. It must not fire on our own incremental syncs, which by
+        definition push into a project we filled ourselves - so the recorded push is
+        what distinguishes the two.
+        """
+        return bool(self.state.get_sync_state(self.repo.name).get("pushed_head"))
+
     def push_to_gitlab(self, export: ExportResult, force: bool = False,
                        on_progress: Optional[Callable[[float, str], None]] = None) -> PushResult:
         git = Git(self.tools, self.repo.export_dir, cancel=self.cancel)
@@ -699,6 +712,7 @@ class MigrationPipeline:
                 default_branch=self.repo.convert.default_branch,
                 lfs_enabled=self.repo.convert.lfs.enabled,
                 force=force,
+                allow_existing=self.already_published(),
                 on_progress=on_progress,
             )
         finally:

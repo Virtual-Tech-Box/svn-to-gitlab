@@ -358,18 +358,29 @@ class GitLabClient:
         return Project.from_json(body)
 
     def ensure_project(self, target: TargetConfig, default_branch: str,
-                       lfs_enabled: bool = True) -> Project:
+                       lfs_enabled: bool = True, allow_existing: bool = False) -> Project:
+        """Find or create the target project.
+
+        `allow_existing` is set by the caller when *this* migration has already
+        pushed here, which is the normal state of every incremental sync after the
+        first one. Without it the non-empty guard - which exists to stop us
+        clobbering an unrelated project - would block the entire sync workflow.
+        """
         full_path = target.full_path()
         existing = self.find_project(full_path)
         if existing:
-            if not existing.empty_repo and not target.allow_non_empty_project:
+            if not existing.empty_repo and not target.allow_non_empty_project \
+                    and not allow_existing:
                 raise GitLabError(
                     f"GitLab project {full_path} already contains commits", 409, "",
-                    "Refusing to push into a non-empty project. Delete it, choose another "
-                    "path, or set `target.allow_non_empty_project: true` if you intend to "
-                    "add to it (an incremental re-sync of the same migration is fine).",
+                    "Refusing to push into a non-empty project, because this migration "
+                    "has no record of having populated it. Delete the project, choose "
+                    "another path, or set `target.allow_non_empty_project: true` to add "
+                    "to it deliberately. (Re-syncing a migration this tool already "
+                    "pushed is allowed automatically.)",
                 )
-            log.info("using existing GitLab project %s (empty=%s)", full_path, existing.empty_repo)
+            log.info("using existing GitLab project %s (empty=%s, previously pushed by us=%s)",
+                     full_path, existing.empty_repo, allow_existing)
             return existing
 
         namespace = None
