@@ -122,7 +122,7 @@ jobs:
       - name: Check the toolchain
         run: svn2gitlab doctor
 
-      - name: Confirm the end-to-end tests actually ran
+      - name: Confirm the conversion suite actually ran
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -131,14 +131,31 @@ jobs:
           $suite = $results.testsuites.testsuite
           $ran = [int]$suite.tests - [int]$suite.skipped
           Write-Host "ran $ran of $($suite.tests) tests ($($suite.skipped) skipped)"
-          # Guards against the failure this job used to hide: a green Windows build
-          # where every conversion test quietly skipped for want of a toolchain.
-          # Only the git-svn equivalence comparison should skip here: Windows has no
-          # git-svn, which is the point. If the conversion suite starts skipping too,
-          # the toolchain has regressed and the build must not be green.
-          if ([int]$suite.skipped -gt 5) {
-            throw "too many skipped tests ($($suite.skipped)); the toolchain is probably incomplete"
+
+          $skipped = $results.SelectNodes("//testcase[skipped]")
+          if ($skipped.Count -gt 0) {
+            Write-Host "`nSkipped here:"
+            foreach ($case in $skipped) {
+              Write-Host ("  {0}::{1}  -  {2}" -f $case.classname, $case.name,
+                          $case.skipped.message)
+            }
           }
+
+          # The failure this guards against: a green Windows build in which every
+          # conversion test quietly skipped for want of a toolchain. Rather than a
+          # magic total, require that the suites which actually convert repositories
+          # ran. Skips elsewhere (notably the git-svn equivalence comparison, which
+          # cannot run without git-svn) are expected on this platform.
+          $mustRun = @("test_e2e", "test_push_integration")
+          $offenders = $skipped | Where-Object {
+            $name = $_.classname
+            $mustRun | Where-Object { $name -like "*$_*" }
+          }
+          if ($offenders) {
+            throw ("the conversion suite did not run: " +
+                   (($offenders | ForEach-Object { $_.name }) -join ", "))
+          }
+          Write-Host "`nConversion suite ran in full without git-svn."
 
   # Prove the frozen build still starts. A PyInstaller bundle can import cleanly in
   # CI and still fail at runtime on a missing hidden import, so it is smoke-tested.
