@@ -1,8 +1,9 @@
 """End-to-end migration including a real push over Git's smart HTTP protocol.
 
-Everything here runs for real: a Subversion repository is built and converted with
-git-svn, a GitLab-shaped API creates the namespace and project, and `git push` sends
-the packfile to a bare repository through `git http-backend`.
+Everything here runs for real: a Subversion repository is built and converted by
+whichever engine the machine supports, a GitLab-shaped API creates the namespace and
+project, and `git push` sends the packfile to a bare repository through
+`git http-backend`.
 
 This is the step that used to be untested — the one that fails at the very end of a
 long job — so the assertions are about what actually arrived on the server, not
@@ -20,19 +21,13 @@ from svn2gitlab.pipeline import build_pipelines
 from svn2gitlab.state import StateStore
 
 from conftest import requires_conversion
-from fake_gitlab import FakeGitLab
+from fake_gitlab import FakeGitLab, find_git_http_backend
 
 pytestmark = pytest.mark.slow
 
 
 def git_http_backend_available(git_exe: str) -> bool:
-    try:
-        exec_path = subprocess.run([git_exe, "--exec-path"], capture_output=True,
-                                   text=True, check=True).stdout.strip()
-    except Exception:
-        return False
-    from pathlib import Path
-    return (Path(exec_path) / "git-http-backend").is_file()
+    return find_git_http_backend(git_exe) is not None
 
 
 @pytest.fixture

@@ -28,6 +28,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+def find_git_http_backend(git_exe: str) -> Optional[Path]:
+    """Locate `git-http-backend`, which carries a .exe suffix on Windows.
+
+    Looking only for the extensionless name made the whole push suite skip on
+    Windows - silently, and on the platform this project most needs to cover.
+    """
+    try:
+        exec_path = subprocess.run([git_exe, "--exec-path"], capture_output=True,
+                                   text=True, check=True).stdout.strip()
+    except Exception:
+        return None
+    for name in ("git-http-backend", "git-http-backend.exe"):
+        candidate = Path(exec_path) / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 class GitLabState:
     """In-memory model of the instance, plus the bare repositories on disk."""
 
@@ -324,10 +342,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _git_http(self, method: str, parsed) -> None:
         """Delegate to `git http-backend`, which speaks the real protocol."""
-        exec_path = subprocess.run([self.git_exe, "--exec-path"], capture_output=True,
-                                   text=True, check=True).stdout.strip()
-        backend = Path(exec_path) / "git-http-backend"
-        if not backend.is_file():
+        backend = find_git_http_backend(self.git_exe)
+        if backend is None:
             self._json(500, {"message": "git-http-backend not available"})
             return
 
