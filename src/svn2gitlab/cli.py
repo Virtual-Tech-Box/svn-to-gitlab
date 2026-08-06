@@ -123,38 +123,82 @@ def doctor(
     table = Table(title="External tools", show_lines=False)
     table.add_column("Tool")
     table.add_column("Status")
+    table.add_column("Needed for", overflow="fold")
     table.add_column("Version / detail", overflow="fold")
     table.add_column("Path", overflow="fold", style="dim")
+
     for info in tools.all():
-        status = "[green]ok[/green]" if info.available else "[red]missing[/red]"
-        table.add_row(info.name, status, info.version or info.detail, info.path or "")
+        purpose, blocking = _tool_role(info.name, tools)
+        if info.available:
+            status = "[green]ok[/green]"
+        elif blocking:
+            status = "[red]missing[/red]"
+        else:
+            # Absent but not a problem. Styling this like a failure is how a perfectly
+            # capable machine ends up looking broken.
+            status = "[dim]not installed[/dim]"
+        detail = info.version if info.available else (info.detail if blocking else "")
+        table.add_row(info.name, status, purpose, detail or "", info.path or "")
     console.print(table)
 
     if _core_ready(tools):
         console.print("\n[green]This machine can run a migration.[/green]")
         engines = []
         if tools.svnadmin.available:
-            engines.append("native (no Perl needed, converts from a local dump)")
+            engines.append("native (no Perl required; converts from a local dump)")
         if tools.git_svn.available:
-            engines.append("git-svn (can convert straight from a remote URL)")
-        console.print(f"Conversion engine(s) available: {', '.join(engines)}.")
+            engines.append("git-svn (converts straight from a remote URL)")
+        console.print(f"Conversion engine: [bold]{engines[0].split(' ')[0]}[/bold]"
+                      + (f" (also available: {', '.join(engines[1:])})" if len(engines) > 1 else ""))
+
+        notes = []
         if not tools.git_svn.available:
-            console.print("[dim]git-svn is unavailable, so a remote URL will be mirrored "
-                          "locally before conversion. Nothing else changes.[/dim]")
+            notes.append("git-svn is not installed. It is optional - the native engine "
+                         "replaces it. A remote URL is mirrored locally first; nothing "
+                         "else changes.")
         if not tools.svnadmin.available:
-            console.print("[yellow]svnadmin is not available, so the native engine, the local "
-                          "fast path and the cutover lock are all unavailable.[/yellow]")
+            notes.append("svnadmin is not installed, so the native engine, the local fast "
+                         "path and the cutover lock are unavailable.")
         if not tools.git_lfs.available:
-            console.print("[yellow]Git LFS is not installed. Install it before migrating a "
-                          "repository with large binaries.[/yellow]")
+            notes.append("Git LFS is not installed. Install it before migrating a "
+                         "repository with large binaries (`convert.lfs.enabled`).")
+        for note in notes:
+            console.print(f"[dim]- {note}[/dim]")
         raise typer.Exit(code=0)
 
     console.print("\n[red]Required tools are missing.[/red]")
     from .tools import _install_hint
-    missing = [i.name for i in tools.all() if not i.available and i.name in
-               ("git", "svn", "svnadmin", "git-svn")]
+    missing = [i.name for i in tools.all()
+               if not i.available and _tool_role(i.name, tools)[1]]
     console.print(_install_hint(missing))
     raise typer.Exit(code=1)
+
+
+def _tool_role(name: str, tools: ToolSet) -> tuple:
+    """(what the tool is for, whether its absence actually blocks a migration).
+
+    Only the second value drives the red "missing" styling. Reporting an optional
+    tool as missing makes a working machine look broken, which is exactly the wrong
+    signal from a command whose entire job is to tell you where you stand.
+    """
+    has_engine = tools.svnadmin.available or tools.git_svn.available
+    roles = {
+        "git": ("everything", True),
+        "svn": ("everything", True),
+        # svnadmin blocks only if it is the last engine standing.
+        "svnadmin": ("native engine, local fast path, cutover lock",
+                     not tools.git_svn.available),
+        "git-svn": ("optional alternative engine; needs Perl",
+                    not tools.svnadmin.available),
+        "git-lfs": ("only with convert.lfs.enabled", False),
+        "svnrdump": ("mirroring a remote repository locally", False),
+        "svnsync": ("mirroring a remote repository locally", False),
+        "svnlook": ("inspecting a local repository", False),
+    }
+    purpose, blocking = roles.get(name, ("", False))
+    if name in ("svnadmin", "git-svn") and not has_engine:
+        blocking = True
+    return purpose, blocking
 
 
 def _core_ready(tools: ToolSet) -> bool:

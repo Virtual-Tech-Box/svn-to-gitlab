@@ -449,3 +449,73 @@ def test_incremental_conversion_extends_history(tmp_path, svn_repo, tools):
     assert result.revisions_fetched >= 1
     listing = git(tmp_path / "mirror", "ls-tree", "-r", "--name-only", "refs/remotes/svn/trunk")
     assert "LATER.txt" in listing
+
+
+# --------------------------------------------------------------------------- #
+# The git-svn engine still has to work
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.slow
+@requires_svn
+@pytest.mark.skipif(not git_svn_available(), reason="git-svn is required")
+def test_pipeline_runs_with_the_git_svn_engine_explicitly(tmp_path, svn_repo):
+    """`convert.engine: git-svn` is a supported option and must keep working.
+
+    Since `auto` now picks the native engine for every local repository, nothing
+    else in the suite drives GitSvnMirror through the pipeline - so without this a
+    regression in the legacy engine would ship unnoticed.
+    """
+    from svn2gitlab.config import load_config
+    from svn2gitlab.pipeline import build_pipelines
+    from svn2gitlab.state import StateStore
+
+    config_path = tmp_path / "gitsvn.yaml"
+    config_path.write_text(f"""
+version: 1
+name: legacy
+workdir: {(tmp_path / 'work').as_posix()}
+source:
+  local_path: {svn_repo.as_posix()}
+authors:
+  file: {(tmp_path / 'authors.txt').as_posix()}
+  default_domain: example.com
+convert:
+  engine: git-svn
+  default_branch: main
+target:
+  gitlab_url: https://gitlab.example.com
+  token: not-a-real-token
+  namespace: g
+  project: p
+verify:
+  mode: full
+  verify_all_branches: true
+""", encoding="utf-8")
+
+    config = load_config(config_path)
+    state = StateStore(config.workdir_path() / "state.db")
+    pipeline = build_pipelines(config, state, dry_run=True)[0]
+    outcome = pipeline.run()
+
+    assert outcome.ok, outcome.error
+    assert pipeline.engine() == "git-svn"
+    assert outcome.verification is not None and outcome.verification.ok
+    refs = git(pipeline.repo.export_dir,
+               "for-each-ref", "--format=%(refname:short)", "refs/heads/").split()
+    assert "main" in refs
+
+
+@pytest.mark.slow
+@requires_svn
+def test_pipeline_uses_the_native_engine_by_default(tmp_path, svn_repo, migration_config):
+    """`auto` must resolve to native for a local repository, whatever else is installed."""
+    from svn2gitlab.config import load_config
+    from svn2gitlab.pipeline import build_pipelines
+    from svn2gitlab.state import StateStore
+
+    config = load_config(migration_config)
+    state = StateStore(config.workdir_path() / "state.db")
+    pipeline = build_pipelines(config, state, dry_run=True)[0]
+    outcome = pipeline.run()
+    assert outcome.ok, outcome.error
+    assert pipeline.engine() == "native"

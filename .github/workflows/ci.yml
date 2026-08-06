@@ -14,8 +14,10 @@ permissions:
   contents: read
 
 jobs:
-  # Full suite including real SVN -> Git conversions. Linux is the cheapest place to
-  # get git-svn and subversion installed, so it carries the version matrix.
+  # Full suite including real SVN -> Git conversions, and the only platform with
+  # git-svn installed: it therefore carries the Python version matrix, the git-svn
+  # engine tests and the native-vs-git-svn tree equivalence comparison. macOS and
+  # Windows deliberately run without git-svn to prove the native engine stands alone.
   test-linux:
     name: Linux / Python ${{ matrix.python }}
     runs-on: ubuntu-latest
@@ -64,7 +66,10 @@ jobs:
         run: svn2gitlab doctor
 
       - name: Run the test suite
-        run: pytest -v --cov=svn2gitlab --cov-report=term-missing
+        run: pytest -v --junit-xml=results.xml --cov=svn2gitlab --cov-report=term-missing
+
+      - name: Confirm the conversion suite actually ran
+        run: python tests/assert_suite_ran.py results.xml
 
   # The other platforms matter because the tool is used on Windows servers and
   # developer Macs. One Python version each is enough to catch path, line-ending and
@@ -78,11 +83,17 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install Subversion and git-svn
-        run: brew install subversion git-svn git-lfs
+      # Deliberately no git-svn, like Windows: a second platform proving the native
+      # engine stands alone. Linux carries the git-svn coverage.
+      - name: Install Subversion
+        run: brew install subversion git-lfs
       - run: pip install -e ".[dev]"
+      # Must pass without git-svn. If it does not, that is the bug.
       - run: svn2gitlab doctor
-      - run: pytest -v
+      - run: pytest -v --junit-xml=results.xml
+
+      - name: Confirm the conversion suite actually ran
+        run: python tests/assert_suite_ran.py results.xml
 
   test-windows:
     name: Windows
@@ -122,40 +133,11 @@ jobs:
       - name: Check the toolchain
         run: svn2gitlab doctor
 
+      - name: Run the test suite
+        run: pytest -v --junit-xml=results.xml
+
       - name: Confirm the conversion suite actually ran
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          pytest -v --junit-xml=results.xml
-          [xml]$results = Get-Content results.xml
-          $suite = $results.testsuites.testsuite
-          $ran = [int]$suite.tests - [int]$suite.skipped
-          Write-Host "ran $ran of $($suite.tests) tests ($($suite.skipped) skipped)"
-
-          $skipped = $results.SelectNodes("//testcase[skipped]")
-          if ($skipped.Count -gt 0) {
-            Write-Host "`nSkipped here:"
-            foreach ($case in $skipped) {
-              Write-Host ("  {0}::{1}  -  {2}" -f $case.classname, $case.name,
-                          $case.skipped.message)
-            }
-          }
-
-          # The failure this guards against: a green Windows build in which every
-          # conversion test quietly skipped for want of a toolchain. Rather than a
-          # magic total, require that the suites which actually convert repositories
-          # ran. Skips elsewhere (notably the git-svn equivalence comparison, which
-          # cannot run without git-svn) are expected on this platform.
-          $mustRun = @("test_e2e", "test_push_integration")
-          $offenders = $skipped | Where-Object {
-            $name = $_.classname
-            $mustRun | Where-Object { $name -like "*$_*" }
-          }
-          if ($offenders) {
-            throw ("the conversion suite did not run: " +
-                   (($offenders | ForEach-Object { $_.name }) -join ", "))
-          }
-          Write-Host "`nConversion suite ran in full without git-svn."
+        run: python tests/assert_suite_ran.py results.xml
 
   # Prove the frozen build still starts. A PyInstaller bundle can import cleanly in
   # CI and still fail at runtime on a missing hidden import, so it is smoke-tested.
