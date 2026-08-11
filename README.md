@@ -64,29 +64,28 @@ anything that is not.
 
 | Tool | Needed for | Notes |
 | --- | --- | --- |
-| `git` | Everything | Any reasonably recent build. No Perl required. |
+| `git` | Everything | Any reasonably recent build. |
 | `svn`, `svnadmin` | Everything | On a VisualSVN Server host these already exist in `C:\Program Files\VisualSVN Server\bin` — either add it to `PATH` or list the folder under `tool_dirs:`. |
 | `svnsync` / `svnrdump` | Mirroring a *remote* repository locally | Either will do; `svnsync` is preferred. |
 | `git-lfs` | Only if `convert.lfs.enabled` | |
-| `git-svn` | **Optional** | Only for `convert.engine: git-svn`. Not needed by the default engine, and absent from Git for Windows since v2.54.0. |
 
-### Conversion engines
+**`git-svn` is not required and not used.** Conversion is done by this project's own
+engine. That is deliberate: Git for Windows removed `git svn` in v2.54.0, citing
+persistent maintenance challenges, so on a current Windows install it is absent
+whichever installer you choose.
 
-The default **native** engine reads an `svnadmin dump` and writes a `git fast-import`
-stream. It needs no Perl, and it converts roughly an order of magnitude faster than
-`git svn`, which makes one server round trip per revision.
+### How conversion works
 
-This matters more than it may sound. **Git for Windows removed `git svn` in
-v2.54.0**, citing persistent maintenance challenges, and upstream now points users
-at WSL or MSYS2 instead. On a current Windows install it is therefore absent
-regardless of which installer you choose, so the native engine is not merely the
-faster option — it is the only one that runs there.
+The engine reads an `svnadmin dump` and writes a `git fast-import` stream. Nothing
+is shelled out to a third-party converter, there is no Perl anywhere in the path,
+and it runs roughly an order of magnitude faster than the round-trip-per-revision
+approach `git svn` used.
 
-`git-svn` remains available (`convert.engine: git-svn`) as the reference
-implementation and for converting straight from a remote URL without mirroring it
-locally first. The two are interchangeable: the test suite asserts that every branch
-and tag they produce has an **identical Git tree object**, so switching engines
-cannot change the published content.
+Its output was originally validated against `git svn` and is now pinned permanently:
+[`tests/test_golden_master.py`](tests/test_golden_master.py) records the exact Git
+tree objects the reference fixture must produce. A tree hashes paths, contents and
+file modes, so if a conversion ever writes something different, the suite says so —
+without needing a deprecated tool installed to compare against.
 
 ---
 
@@ -239,8 +238,8 @@ preflight → analyze → authors → acquire → convert → export → push �
 Each stage records its outcome, so a re-run resumes at the first stage that has not
 succeeded.
 
-**Two repositories, not one.** The *mirror* is a `git-svn` working repository that
-keeps its `git-svn-id` trailers and `refs/remotes/svn/*` layout — that metadata is
+**Two repositories, not one.** The *mirror* holds the converted history under
+`refs/remotes/svn/*` with a `git-svn-id:` trailer per commit — that metadata is
 what makes `git svn fetch` resumable and incremental. The *export* is derived from
 it, and is what GitLab receives: real branches, real tags, clean messages, LFS
 pointers. Publishing requires rewriting exactly the things the mirror needs intact,
@@ -316,7 +315,6 @@ Stated up front, because these surprise people:
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `git-svn: this git build does not include the svn subcommand` | Expected on Windows: Git for Windows dropped `git svn` in v2.54.0. Nothing to fix — the default native engine does not need it. Only relevant if you explicitly set `convert.engine: git-svn`, which on Windows means using WSL or MSYS2. On Debian/Ubuntu, `apt install git-svn`. |
 | `SVN author 'x' is not present in the author map` | A new committer appeared. `migrate` needs `svn2gitlab authors --write`; `sync` now picks new authors up automatically. The fetch resumes where it stopped. |
 | Push rejected, `pre-receive hook declined` | GitLab push rules reject imported history (commit-message regex, author-email restriction, max file size). Disable them for the migration, then re-enable. |
 | Push rejected, file too large | Enable `convert.lfs.enabled` and re-run with `--restart-from export`. |
@@ -364,8 +362,7 @@ a clean clone of the content, the default branch, and that protection is applied
 *after* the push rather than before. Not covered there: Git LFS uploads (which need
 an LFS batch API) and GitLab push rules, which remain rehearsal-only.
 
-All of these skip automatically where `svn`, `git-svn` or `git-http-backend` are
-unavailable.
+All of these skip automatically where `svn` or `git-http-backend` are unavailable.
 
 Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the setup and
 the four rules that matter here: verification must be able to fail, errors must carry

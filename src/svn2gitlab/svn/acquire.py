@@ -71,11 +71,11 @@ def choose_strategy(source: SourceConfig, tools: ToolSet, head_revision: int,
     if requested == FastPath.NONE:
         if require_local and not source.local_path:
             raise SvnError(
-                "the native conversion engine needs a local repository, but "
-                "`fast_path: none` forbids making one",
+                "conversion needs a local repository, but `fast_path: none` "
+                "forbids making one",
                 "Set `fast_path: auto` so the repository is mirrored locally first, "
-                "or use `convert.engine: git-svn`, which can convert straight from a "
-                "remote URL.",
+                "or point `source.local_path` at the repository if this is the "
+                "Subversion server.",
             )
         return "direct"
     if requested == FastPath.HOTCOPY:
@@ -91,9 +91,10 @@ def choose_strategy(source: SourceConfig, tools: ToolSet, head_revision: int,
         return "mirror"
     if require_local:
         raise SvnError(
-            "the native conversion engine needs a local copy of the repository, but "
-            "neither svnsync nor svnrdump is available to make one",
-            "Install a full Subversion client, or set `convert.engine: git-svn`.",
+            "conversion needs a local copy of the repository, but neither svnsync "
+            "nor svnrdump is available to make one",
+            "Install a full Subversion client (both ship with Subversion), or run "
+            "this on the Subversion server with `source.local_path` set.",
         )
     return "direct"
 

@@ -28,6 +28,16 @@ the dependency entirely.
   project, fired on the tool's own re-pushes and broke the entire sync workflow.
   A push recorded in the state store now marks the project as ours to update.
 
+### Removed
+
+- **git-svn, entirely.** It is no longer probed for, reported by `doctor`, shown in
+  the web dashboard, or selectable via `convert.engine`. Upstream removed `git svn`
+  from Git for Windows in v2.54.0, this project's own engine produces identical
+  trees, and keeping it as an "optional fallback" achieved nothing except putting a
+  red `missing` row in front of operators on machines that were working perfectly.
+  `convert.engine` now raises a clear error explaining the removal rather than a
+  generic unknown-key failure.
+
 ### Added
 
 - Golden-master trees: the exact Git tree objects the fixture must produce are

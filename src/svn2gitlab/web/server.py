@@ -105,7 +105,8 @@ def create_app(config_path: Optional[Path] = None) -> FastAPI:
             "name": app_state.config.name if app_state.config else "",
             "workdir": str(app_state.config.workdir_path()) if app_state.config else "",
             "tools": tools.to_dict(),
-            "tools_ready": tools.git.available and tools.git_svn.available and tools.svn.available,
+            "tools_ready": (tools.git.available and tools.svn.available
+                            and tools.svnadmin.available),
         }
 
     @app.post("/api/reload")

@@ -86,13 +86,7 @@ class FastPath(str, Enum):
     AUTO = "auto"        # pick the best available for this source
     HOTCOPY = "hotcopy"  # svnadmin hotcopy from a local repository path
     RDUMP = "rdump"      # svnrdump the remote into a fresh local repository
-    NONE = "none"        # talk to the live server with git-svn directly
-
-
-class ConversionEngine(str, Enum):
-    AUTO = "auto"          # native where it can run, git-svn otherwise
-    NATIVE = "native"      # built-in dump -> fast-import converter; no Perl needed
-    GIT_SVN = "git-svn"    # the reference implementation
+    NONE = "none"        # no local copy (only valid when source.local_path is set)
 
 
 class TagStyle(str, Enum):
@@ -222,7 +216,7 @@ class SourceConfig(_Base):
         return self
 
     def effective_url(self) -> str:
-        """A URL git-svn can use, preferring the local repository when present."""
+        """A URL to convert from, preferring the local repository when present."""
         if self.local_path:
             return Path(self.local_path).resolve().as_uri()
         return self.url or ""
@@ -260,10 +254,6 @@ class LfsConfig(_Base):
 
 
 class ConvertConfig(_Base):
-    # Which converter turns Subversion history into Git objects. The native engine
-    # needs no Perl and is far faster; git-svn remains available as a fallback and
-    # is the only option when converting straight from a remote URL.
-    engine: ConversionEngine = ConversionEngine.AUTO
     default_branch: str = "main"
     # Strip the `git-svn-id:` trailer from commit messages in the pushed history.
     strip_svn_metadata: bool = True
@@ -279,7 +269,7 @@ class ConvertConfig(_Base):
     generate_gitignore: bool = True
     # Drop branches/tags whose SVN path was deleted before HEAD.
     include_deleted_refs: bool = False
-    # git-svn cannot represent empty directories; optionally materialise .gitkeep.
+    # Git cannot represent empty directories; optionally materialise .gitkeep.
     preserve_empty_dirs: bool = False
     # Rewrite refs so branch names are valid in git (spaces, ~, ^, .. etc.).
     sanitize_ref_names: bool = True
@@ -601,6 +591,7 @@ def load_config(path: os.PathLike | str) -> MigrationConfig:
         raise ConfigError(f"{path} is empty")
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a YAML mapping at the top level")
+    _reject_removed_keys(raw, path)
     try:
         config = MigrationConfig(**raw)
     except ConfigError:
@@ -609,6 +600,22 @@ def load_config(path: os.PathLike | str) -> MigrationConfig:
         raise ConfigError(f"invalid configuration in {path}:\n{_format_validation(exc)}") from exc
     config._source_path = path
     return config
+
+
+def _reject_removed_keys(raw: Dict[str, Any], path: Path) -> None:
+    """Explain removed settings instead of failing with `extra fields not permitted`."""
+    sections = [raw.get("convert") or {}]
+    sections += [r.get("convert") or {} for r in (raw.get("repositories") or [])
+                 if isinstance(r, dict)]
+    for section in sections:
+        if isinstance(section, dict) and "engine" in section:
+            raise ConfigError(
+                f"`convert.engine` was removed in 1.0.1 ({path})",
+                "There is now a single conversion engine, built into this tool. The "
+                "git-svn engine is gone because Git for Windows removed `git svn` in "
+                "v2.54.0 and the built-in engine produces identical trees. Delete the "
+                "`engine:` line.",
+            )
 
 
 def _format_validation(exc: Exception) -> str:

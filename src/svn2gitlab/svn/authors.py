@@ -1,12 +1,13 @@
 """Author mapping between SVN usernames and Git identities.
 
-git-svn reads a file of `svnuser = Real Name <email>` lines. Getting this right is
-the difference between a GitLab history where every commit links to a real user
-and one where 40,000 commits are attributed to `jsmith@localhost`.
+Getting this right is the difference between a GitLab history where every commit
+links to a real person and one where 40,000 commits are attributed to
+`jsmith@localhost`.
 
-We support the standard git-svn format plus a couple of pragmatic extensions:
-domain accounts (`ACME\\jsmith`, `jsmith@acme.local`) are normalised, and the file
-round-trips comments so an operator can annotate it during review.
+The file format is the long-established `svnuser = Real Name <email>` convention, so
+an existing authors file from a previous migration works unchanged. Two pragmatic
+extensions: domain accounts (`ACME\\jsmith`, `jsmith@acme.local`) are normalised, and
+the file round-trips comments so an operator can annotate it during review.
 """
 
 from __future__ import annotations
@@ -107,14 +108,6 @@ class AuthorMap:
             lines.append(f"{svn_user.ljust(width)} = {identity}")
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         log.info("wrote %d author mapping(s) to %s", len(self), path)
-
-    def write_git_svn_file(self, path: Path) -> Path:
-        """Emit the exact format git-svn expects (no comments, no padding surprises)."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [f"{svn_user} = {identity}" for svn_user, identity in
-                 sorted(self, key=lambda kv: kv[0].lower())]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return path
 
     # -- validation ----------------------------------------------------------
 

@@ -1,11 +1,12 @@
-"""Deriving the publishable Git repository from the git-svn mirror.
+"""Deriving the publishable Git repository from the mirror.
 
 Why two repositories?
 
-`git svn fetch` needs its `git-svn-id` trailers and `refs/remotes/svn/*` layout to
-stay resumable and incremental. Everything we want to publish - real branches, real
-tags, clean commit messages, LFS pointers - requires rewriting exactly those things.
-Doing both in one repository means every rewrite breaks the next sync.
+The mirror needs its `git-svn-id` trailers and `refs/remotes/svn/*` layout to stay
+resumable and incremental - the trailer is how we know which Subversion revision it
+already holds. Everything we want to publish - real branches, real tags, clean commit
+messages, LFS pointers - requires rewriting exactly those things. Doing both in one
+repository means every rewrite breaks the next sync.
 
 So the mirror stays pristine and the export is re-derived from it on demand. Because
 every step here is deterministic (fixed tagger dates, fixed synthetic-commit
@@ -28,7 +29,7 @@ from ..svn.analyze import sanitize_ref_name
 from ..tools import ToolSet
 from . import fastfilter, lfs as lfs_mod
 from .git import Git
-from .gitsvn import SVN_PREFIX, GitSvnMirror
+from .mirrorfmt import SVN_PREFIX
 
 log = get_logger("export")
 
@@ -88,7 +89,7 @@ class Exporter:
     def __init__(
         self,
         tools: ToolSet,
-        mirror: GitSvnMirror,
+        mirror,
         export_dir: Path,
         convert: ConvertConfig,
         cancel: Optional[Event] = None,

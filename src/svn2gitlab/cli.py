@@ -143,19 +143,8 @@ def doctor(
 
     if _core_ready(tools):
         console.print("\n[green]This machine can run a migration.[/green]")
-        engines = []
-        if tools.svnadmin.available:
-            engines.append("native (no Perl required; converts from a local dump)")
-        if tools.git_svn.available:
-            engines.append("git-svn (converts straight from a remote URL)")
-        console.print(f"Conversion engine: [bold]{engines[0].split(' ')[0]}[/bold]"
-                      + (f" (also available: {', '.join(engines[1:])})" if len(engines) > 1 else ""))
 
         notes = []
-        if not tools.git_svn.available:
-            notes.append("git-svn is not installed. It is optional - the native engine "
-                         "replaces it. A remote URL is mirrored locally first; nothing "
-                         "else changes.")
         if not tools.svnadmin.available:
             notes.append("svnadmin is not installed, so the native engine, the local fast "
                          "path and the cutover lock are unavailable.")
@@ -181,37 +170,22 @@ def _tool_role(name: str, tools: ToolSet) -> tuple:
     tool as missing makes a working machine look broken, which is exactly the wrong
     signal from a command whose entire job is to tell you where you stand.
     """
-    has_engine = tools.svnadmin.available or tools.git_svn.available
     roles = {
         "git": ("everything", True),
         "svn": ("everything", True),
-        # svnadmin blocks only if it is the last engine standing.
-        "svnadmin": ("native engine, local fast path, cutover lock",
-                     not tools.git_svn.available),
-        "git-svn": ("optional alternative engine; needs Perl",
-                    not tools.svnadmin.available),
+        "svnadmin": ("conversion, local fast path, cutover lock", True),
         "git-lfs": ("only with convert.lfs.enabled", False),
         "svnrdump": ("mirroring a remote repository locally", False),
         "svnsync": ("mirroring a remote repository locally", False),
         "svnlook": ("inspecting a local repository", False),
     }
-    purpose, blocking = roles.get(name, ("", False))
-    if name in ("svnadmin", "git-svn") and not has_engine:
-        blocking = True
-    return purpose, blocking
+    return roles.get(name, ("", False))
 
 
 def _core_ready(tools: ToolSet) -> bool:
-    """Enough to convert something.
-
-    git and an svn client are non-negotiable. Beyond that we need *an* engine:
-    svnadmin drives the native converter, git-svn drives the legacy one. Requiring
-    both was what made this tool look broken on any Windows box whose Git build
-    omits Perl.
-    """
-    if not (tools.git.available and tools.svn.available):
-        return False
-    return tools.svnadmin.available or tools.git_svn.available
+    """Everything a migration needs: git, an svn client, and svnadmin for the dump."""
+    return (tools.git.available and tools.svn.available
+            and tools.svnadmin.available)
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +236,7 @@ version: 1
 name: {name}
 
 # Working directory. Needs roughly 4x the size of the Subversion repository:
-# the git-svn mirror, the publishable export, and a temporary verification export.
+# the mirror, the publishable export, and a temporary verification export.
 workdir: ./svn2gitlab-work
 
 source:
@@ -290,9 +264,6 @@ authors:
   policy: generate                      # generate | strict
 
 convert:
-  # native  = built-in converter, no Perl needed, much faster (default where possible)
-  # git-svn = reference implementation; can convert straight from a remote URL
-  engine: auto                          # auto | native | git-svn
   default_branch: main
   strip_svn_metadata: true              # remove git-svn-id from published messages
   keep_revision_trailer: true           # keep `Svn-Revision: NNN` for traceability
@@ -446,7 +417,7 @@ def authors(
                                                  pipeline.repo.authors, existing)
             generated = set(synthesised)
             for user, count in list(pipeline.analysis.authors.items())[:200]:
-                # git-svn records authorless revisions under the literal key
+                # Authorless revisions are recorded under the literal key
                 # "(no author)", which is how we store them too.
                 identity = amap.get(user or "(no author)")
                 label = str(identity) if identity else "[red]unmapped[/red]"

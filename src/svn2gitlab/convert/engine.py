@@ -1,16 +1,12 @@
-"""Engine selection: the native converter or git-svn, behind one interface.
+"""The mirror: Subversion history converted into a Git repository.
 
-The export stage, the verifier and the incremental sync all talk to a "mirror": a
-repository holding `refs/remotes/svn/*` and commits carrying `git-svn-id` trailers.
-Both engines produce exactly that, so everything downstream is engine-agnostic and
-switching engines cannot change the published result.
+Conversion is done entirely by this project (`dumpstream.py` reads an
+`svnadmin dump`, `native.py` writes a `git fast-import` stream). There is no
+dependency on `git svn`, which Git for Windows removed in v2.54.0.
 
-Choosing between them:
-
-* **native** needs a local Subversion repository (to take a fulltext dump) and
-  `svnadmin`. It has no Perl dependency and converts an order of magnitude faster.
-* **git-svn** works directly against a remote URL and is the reference
-  implementation, kept as a fallback for anything the native engine declines.
+The result is laid out under `refs/remotes/svn/*` with a `git-svn-id:` trailer per
+commit. The export stage, the verifier and the incremental sync all read that, and
+`tests/test_golden_master.py` pins the exact trees it must produce.
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ from pathlib import Path
 from threading import Event
 from typing import Callable, Dict, List, Optional
 
-from ..config import ConversionEngine, ConvertConfig, SourceConfig
+from ..config import ConvertConfig, SourceConfig
 from ..errors import ConversionError
 from ..logging_setup import get_logger
 from ..procs import IS_WINDOWS
@@ -31,50 +27,10 @@ from ..svn.analyze import DetectedLayout
 from ..svn.authors import AuthorMap
 from ..tools import ToolSet
 from .git import Git
-from .gitsvn import SVN_PREFIX, FetchResult, GitSvnMirror
+from .mirrorfmt import SVN_PREFIX, FetchResult
 from .native import NativeConverter, dump_command
 
 log = get_logger("engine")
-
-
-def resolve_engine(requested: ConversionEngine, tools: ToolSet,
-                   has_local_repo: bool) -> str:
-    """Turn `auto` into a concrete engine, or validate an explicit choice."""
-    if requested == ConversionEngine.NATIVE:
-        if not tools.svnadmin.available:
-            raise ConversionError(
-                "convert.engine is `native` but svnadmin is not available",
-                "The native engine converts from an `svnadmin dump`. Install a "
-                "Subversion server package, or set `convert.engine: git-svn`.",
-            )
-        return "native"
-
-    if requested == ConversionEngine.GIT_SVN:
-        if not tools.git_svn.available:
-            raise ConversionError(
-                f"convert.engine is `git-svn` but it is unusable: {tools.git_svn.detail}",
-                "Git for Windows removed `git svn` in v2.54.0, so on Windows this "
-                "engine needs WSL or MSYS2. Switch to `convert.engine: native`, "
-                "which requires neither.",
-            )
-        return "git-svn"
-
-    # auto: prefer native wherever it can run.
-    if tools.svnadmin.available and has_local_repo:
-        return "native"
-    if tools.git_svn.available:
-        log.info("using git-svn: %s", "no local repository available" if not has_local_repo
-                 else "svnadmin is unavailable")
-        return "git-svn"
-    if tools.svnadmin.available:
-        # No git-svn at all, so the source must be brought local first.
-        return "native"
-    raise ConversionError(
-        "no usable conversion engine: neither svnadmin nor git-svn is available",
-        "Install a Subversion client (which provides svnadmin) for the native "
-        "engine, or Git for Windows' standard installer for git-svn. "
-        "`svn2gitlab doctor` reports what is missing.",
-    )
 
 
 class NativeMirror:
@@ -130,7 +86,7 @@ class NativeMirror:
         return self.git.exists
 
     def last_fetched_revision(self) -> int:
-        from .gitsvn import extract_svn_revision
+        from .mirrorfmt import extract_svn_revision
         best = 0
         for ref in self.git.list_refs(f"refs/remotes/{SVN_PREFIX}"):
             meta = self.git.commit_meta(ref.sha)
@@ -139,7 +95,7 @@ class NativeMirror:
         return best
 
     def revision_of(self, ref: str) -> int:
-        from .gitsvn import extract_svn_revision
+        from .mirrorfmt import extract_svn_revision
         meta = self.git.commit_meta(ref)
         return extract_svn_revision(meta.get("message", "")) or 0
 
@@ -292,7 +248,6 @@ class NativeMirror:
 
 
 def build_mirror(
-    engine: str,
     tools: ToolSet,
     repo_dir: Path,
     source_url: str,
@@ -305,8 +260,8 @@ def build_mirror(
     uuid: str = "",
     cancel: Optional[Event] = None,
 ):
-    """Construct whichever mirror implementation the resolved engine calls for."""
-    if engine == "native":
+    """Construct the mirror for this repository."""
+    if True:
         if not local_repo:
             raise ConversionError(
                 "the native engine needs a local Subversion repository",
@@ -322,8 +277,3 @@ def build_mirror(
         mirror.authors_file = authors_file
         return mirror
 
-    mirror = GitSvnMirror(
-        tools=tools, repo_dir=repo_dir, source_url=source_url, layout=layout,
-        convert=convert, source=source, authors_file=authors_file, cancel=cancel,
-    )
-    return mirror

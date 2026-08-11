@@ -10,8 +10,7 @@ The mapping problem it solves: Subversion has no branches, only directories, so
 every path has to be classified against the repository layout. `trunk/src/app.py`
 becomes `src/app.py` on the default branch; `branches/release-1.x/src/app.py`
 becomes `src/app.py` on `release-1.x`; `tags/v1.0/...` becomes a tag. A single SVN
-revision touching several of those produces several Git commits, exactly as git-svn
-would.
+revision touching several of those produces several Git commits.
 
 Fidelity notes, because they are the whole point:
 
@@ -40,7 +39,7 @@ from ..svn.authors import AuthorMap, Identity
 from .dumpstream import (ACTION_ADD, ACTION_CHANGE, ACTION_DELETE, ACTION_REPLACE,
                          DumpReader, Node, Revision, svn_date_to_git)
 from .fastimport import FastImport
-from .gitsvn import SVN_PREFIX
+from .mirrorfmt import SVN_PREFIX
 
 log = get_logger("native")
 
@@ -205,9 +204,9 @@ class NativeConverter:
     # -- ref naming ----------------------------------------------------------
 
     def _git_ref(self, key: str) -> str:
-        """Write into git-svn's ref namespace.
+        """Write into the mirror's ref namespace.
 
-        The native engine is a drop-in replacement for the git-svn mirror, so it
+        The layout is the long-established `refs/remotes/svn/*` convention, so it
         produces exactly the refs the export stage already knows how to read. Nothing
         downstream needs to care which engine ran.
         """
@@ -254,7 +253,7 @@ class NativeConverter:
         Without this, a second conversion pass would start every branch from scratch
         and orphan the history the first pass produced.
         """
-        from .gitsvn import extract_svn_revision
+        from .mirrorfmt import extract_svn_revision
 
         prefix = f"refs/remotes/{SVN_PREFIX}"
         tags_prefix = f"{prefix}{self.tags_path}/"

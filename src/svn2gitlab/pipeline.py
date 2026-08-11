@@ -23,8 +23,8 @@ from .config import (AuthorPolicy, FastPath, MigrationConfig, ResolvedRepo,
                      VerifyMode)
 from .convert.export import ExportResult, Exporter
 from .convert.git import Git
-from .convert.engine import build_mirror, resolve_engine
-from .convert.gitsvn import GitSvnMirror, FetchResult
+from .convert.engine import build_mirror
+from .convert.mirrorfmt import FetchResult
 from .errors import (AbortedError, ConfigError, ConversionError, Svn2GitlabError,
                      ToolMissingError, VerificationError)
 from .gitlab.api import GitLabClient
@@ -126,13 +126,12 @@ class MigrationPipeline:
 
         # Lazily built, but shared between the initial run and later sync rounds.
         self._svn: Optional[SvnClient] = None
-        self._mirror: Optional[GitSvnMirror] = None
+        self._mirror: Optional[Any] = None
         self._exporter: Optional[Exporter] = None
         self._gitlab: Optional[GitLabClient] = None
         self._analysis: Optional[RepoAnalysis] = None
         self._authors: Optional[AuthorMap] = None
         self._acquisition: Optional[acquire_mod.Acquisition] = None
-        self._engine: Optional[str] = None
         self._current_stage = ""
 
     # -- shared components ---------------------------------------------------
@@ -226,13 +225,6 @@ class MigrationPipeline:
             return self.repo.local_repo_dir
         return None
 
-    def engine(self) -> str:
-        if self._engine is None:
-            self._engine = resolve_engine(self.repo.convert.engine, self.tools,
-                                          has_local_repo=self.local_repo_path() is not None)
-            log.info("conversion engine: %s", self._engine)
-        return self._engine
-
     @property
     def mirror(self):
         if self._mirror is None:
@@ -240,7 +232,6 @@ class MigrationPipeline:
             if not layout.trunk and not layout.branches and not layout.tags:
                 layout = layout_for_source(self.svn, self.repo.source, self.source_url())
             self._mirror = build_mirror(
-                engine=self.engine(),
                 tools=self.tools,
                 repo_dir=self.repo.mirror_dir,
                 source_url=self.convert_url(),
@@ -409,17 +400,9 @@ class MigrationPipeline:
             info = getattr(self.tools, name.replace("-", "_"))
             if not info.available:
                 problems.append(f"{name}: {info.detail or 'not found'}")
-        # git-svn is only needed if that engine is the one that will run. The native
-        # engine needs svnadmin instead, and neither is universally present.
-        if not problems:
-            try:
-                engine = resolve_engine(
-                    self.repo.convert.engine, self.tools,
-                    has_local_repo=bool(self.repo.source.local_path)
-                    or self.repo.source.fast_path != FastPath.NONE)
-                self._engine = engine
-            except ConversionError as exc:
-                problems.append(str(exc))
+        # svnadmin drives the conversion: it produces the dump the converter reads.
+        if not self.tools.svnadmin.available:
+            problems.append(f"svnadmin: {self.tools.svnadmin.detail or 'not found'}")
         if self.repo.convert.lfs.enabled and not self.tools.git_lfs.available:
             problems.append(f"git-lfs: {self.tools.git_lfs.detail or 'not found'} "
                             "(required because convert.lfs.enabled is true)")
@@ -559,7 +542,6 @@ class MigrationPipeline:
             header += ["", f"Generated automatically for {len(synthesised)} user(s): "
                            + ", ".join(sorted(synthesised)[:30])]
         amap.save(self.repo.authors_file, header=header)
-        amap.write_git_svn_file(self.repo.workdir / "authors-git-svn.txt")
 
         invalid = amap.invalid_emails()
         duplicates = amap.duplicate_emails()
@@ -593,7 +575,7 @@ class MigrationPipeline:
             estimated_bytes=estimated,
             cancel=self.cancel,
             on_progress=self._progress,
-            require_local=self.engine() == "native",
+            require_local=True,
         )
         self._acquisition = acquisition
         # The mirror must be rebuilt against the acquired URL.
@@ -603,8 +585,7 @@ class MigrationPipeline:
 
     def _stage_convert(self) -> Dict[str, Any]:
         mirror = self.mirror
-        mirror.authors_file = self.repo.workdir / "authors-git-svn.txt"
-        self._progress(0.02, "initialising the git-svn mirror")
+        self._progress(0.02, "initialising the mirror")
         mirror.init()
 
         already = mirror.last_fetched_revision()
@@ -617,9 +598,7 @@ class MigrationPipeline:
             head_revision=self.analysis.head_revision,
             on_progress=self._progress,
         )
-        payload = result.to_dict()
-        payload["engine"] = self.engine()
-        return payload
+        return result.to_dict()
 
     def _stage_export(self, outcome: MigrationOutcome) -> Dict[str, Any]:
         export = self.exporter.build(on_progress=self._progress)
@@ -684,7 +663,7 @@ class MigrationPipeline:
         """Pick up authors who have committed since the last sync.
 
         Without this, the first commit by a new joiner aborts every subsequent sync:
-        git-svn refuses to convert a revision whose author is not in the map, and the
+        Conversion refuses a revision whose author is not in the map, and the
         operator has to notice, run `authors --write`, and re-run by hand.
         """
         url = self.source_url()
@@ -711,14 +690,12 @@ class MigrationPipeline:
 
         amap, synthesised = build_author_map(sorted(seen), self.repo.authors, existing)
         amap.save(self.repo.authors_file, header=list(AUTHORS_HEADER))
-        amap.write_git_svn_file(self.repo.workdir / "authors-git-svn.txt")
         self._authors = amap
         return new_authors
 
     def fetch_revisions(self, on_progress: Optional[Callable[[float, str], None]] = None) -> FetchResult:
         """Fetch new revisions into the mirror (used by incremental sync)."""
         mirror = self.mirror
-        mirror.authors_file = self.repo.workdir / "authors-git-svn.txt"
         mirror.init()
         self.refresh_authors(mirror.last_fetched_revision())
         head = self.svn_head_revision()
@@ -862,7 +839,7 @@ class MigrationPipeline:
         return pairs
 
     def _mirror_ref_for(self, branch: str, svn_path: str) -> str:
-        from .convert.gitsvn import SVN_PREFIX
+        from .convert.mirrorfmt import SVN_PREFIX
         if svn_path:
             return f"refs/remotes/{SVN_PREFIX}{svn_path}"
         return self.mirror.trunk_ref

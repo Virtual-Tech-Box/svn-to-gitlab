@@ -1,12 +1,8 @@
-"""The native conversion engine, and its equivalence with git-svn.
+"""The conversion engine: dump parsing, layout mapping and real conversions.
 
-The equivalence tests are the important ones. A second converter is only worth
-having if it produces the same history as the reference implementation, so these
-compare Git *tree objects* — identical tree SHAs mean identical paths, contents and
-modes, with no room for interpretation.
-
-They skip when git-svn is unavailable (which is increasingly common on Windows, and
-the whole reason this engine exists); the native-only tests still run there.
+The engine reads an `svnadmin dump` and writes a `git fast-import` stream. Its
+output was originally validated against `git svn` and is now pinned permanently by
+`test_golden_master.py`, which needs no external reference implementation.
 """
 
 from __future__ import annotations
@@ -16,14 +12,13 @@ import subprocess
 
 import pytest
 
-from svn2gitlab.config import ConversionEngine, ConvertConfig, LayoutMode, SourceConfig
+from svn2gitlab.config import ConvertConfig, LayoutMode, SourceConfig
 from svn2gitlab.convert.dumpstream import DumpReader, _parse_properties, svn_date_to_git
-from svn2gitlab.convert.engine import resolve_engine
 from svn2gitlab.convert.native import LayoutMapper, NativeConverter, TRUNK_BRANCH
 from svn2gitlab.errors import ConversionError
 from svn2gitlab.svn.analyze import DetectedLayout
 from svn2gitlab.svn.authors import AuthorMap, Identity
-from svn2gitlab.tools import ToolSet, detect_tools
+from svn2gitlab.tools import ToolSet
 
 from conftest import requires_svn
 
@@ -196,52 +191,6 @@ def test_ref_keys_separate_tags_from_branches():
 
 
 # --------------------------------------------------------------------------- #
-# Engine selection
-# --------------------------------------------------------------------------- #
-
-def toolset(**flags) -> ToolSet:
-    tools = ToolSet()
-    for name, available in flags.items():
-        getattr(tools, name).available = available
-        getattr(tools, name).path = f"/usr/bin/{name}" if available else None
-    return tools
-
-
-def test_auto_prefers_native_when_a_local_repository_exists():
-    tools = toolset(git=True, svn=True, svnadmin=True, git_svn=True)
-    assert resolve_engine(ConversionEngine.AUTO, tools, has_local_repo=True) == "native"
-
-
-def test_auto_falls_back_to_git_svn_for_a_remote_source():
-    tools = toolset(git=True, svn=True, svnadmin=True, git_svn=True)
-    assert resolve_engine(ConversionEngine.AUTO, tools, has_local_repo=False) == "git-svn"
-
-
-def test_auto_uses_native_when_git_svn_is_absent():
-    """The case that motivated the engine: Windows without Perl."""
-    tools = toolset(git=True, svn=True, svnadmin=True, git_svn=False)
-    assert resolve_engine(ConversionEngine.AUTO, tools, has_local_repo=False) == "native"
-
-
-def test_explicit_git_svn_without_git_svn_is_an_error():
-    tools = toolset(git=True, svn=True, svnadmin=True, git_svn=False)
-    with pytest.raises(ConversionError, match="native"):
-        resolve_engine(ConversionEngine.GIT_SVN, tools, has_local_repo=True)
-
-
-def test_explicit_native_without_svnadmin_is_an_error():
-    tools = toolset(git=True, svn=True, svnadmin=False, git_svn=True)
-    with pytest.raises(ConversionError, match="svnadmin"):
-        resolve_engine(ConversionEngine.NATIVE, tools, has_local_repo=True)
-
-
-def test_no_engine_at_all_is_an_error():
-    tools = toolset(git=True, svn=True, svnadmin=False, git_svn=False)
-    with pytest.raises(ConversionError, match="no usable conversion engine"):
-        resolve_engine(ConversionEngine.AUTO, tools, has_local_repo=True)
-
-
-# --------------------------------------------------------------------------- #
 # Conversion against a real repository
 # --------------------------------------------------------------------------- #
 
@@ -331,58 +280,6 @@ def test_svn_ignore_is_captured_for_gitignore_generation(tmp_path, svn_repo, too
     assert "build/" in content
 
 
-# --------------------------------------------------------------------------- #
-# Equivalence with git-svn
-# --------------------------------------------------------------------------- #
-
-def git_svn_available() -> bool:
-    return detect_tools().git_svn.available
-
-
-@pytest.mark.slow
-@requires_svn
-@pytest.mark.skipif(not git_svn_available(), reason="git-svn is required to compare against")
-def test_native_trees_are_identical_to_git_svn(tmp_path, svn_repo, tools):
-    """The claim that justifies having a second engine at all.
-
-    Identical tree objects mean identical paths, contents and file modes on every
-    branch and tag. Commit SHAs are allowed to differ (the engines word their
-    metadata trailers differently); the content must not.
-    """
-    authors = tmp_path / "authors.txt"
-    author_map().write_git_svn_file(authors)
-
-    reference = tmp_path / "gitsvn"
-    subprocess.run([tools.git.path, "init", "-q", "-b", "main", str(reference)], check=True)
-    subprocess.run(
-        [tools.git.path, "-C", str(reference), "svn", "init", svn_repo.as_uri(),
-         "--prefix=svn/", "--trunk=trunk", "--branches=branches", "--tags=tags"],
-        check=True, capture_output=True)
-    subprocess.run(
-        [tools.git.path, "-C", str(reference), "svn", "fetch",
-         f"--authors-file={authors}", "--log-window-size=10000"],
-        check=True, capture_output=True)
-
-    target, _result, _c = convert_natively(tmp_path, svn_repo, tools)
-
-    reference_refs = {
-        line.split()[1]: line.split()[0]
-        for line in git(reference, "for-each-ref", "--format=%(objectname) %(refname)",
-                        "refs/remotes/").splitlines()
-    }
-    assert reference_refs, "git-svn produced no refs to compare against"
-
-    compared = 0
-    for refname in reference_refs:
-        expected = git(reference, "rev-parse", f"{refname}^{{tree}}")
-        actual = subprocess.run(["git", "-C", str(target), "rev-parse", f"{refname}^{{tree}}"],
-                                capture_output=True, text=True)
-        assert actual.returncode == 0, f"native engine is missing {refname}"
-        assert actual.stdout.strip() == expected, (
-            f"{refname}: native tree {actual.stdout.strip()[:12]} != "
-            f"git-svn tree {expected[:12]}")
-        compared += 1
-    assert compared >= 3, "too few refs compared for this to mean anything"
 
 
 # --------------------------------------------------------------------------- #
@@ -451,64 +348,12 @@ def test_incremental_conversion_extends_history(tmp_path, svn_repo, tools):
     assert "LATER.txt" in listing
 
 
-# --------------------------------------------------------------------------- #
-# The git-svn engine still has to work
-# --------------------------------------------------------------------------- #
-
-@pytest.mark.slow
-@requires_svn
-@pytest.mark.skipif(not git_svn_available(), reason="git-svn is required")
-def test_pipeline_runs_with_the_git_svn_engine_explicitly(tmp_path, svn_repo):
-    """`convert.engine: git-svn` is a supported option and must keep working.
-
-    Since `auto` now picks the native engine for every local repository, nothing
-    else in the suite drives GitSvnMirror through the pipeline - so without this a
-    regression in the legacy engine would ship unnoticed.
-    """
-    from svn2gitlab.config import load_config
-    from svn2gitlab.pipeline import build_pipelines
-    from svn2gitlab.state import StateStore
-
-    config_path = tmp_path / "gitsvn.yaml"
-    config_path.write_text(f"""
-version: 1
-name: legacy
-workdir: {(tmp_path / 'work').as_posix()}
-source:
-  local_path: {svn_repo.as_posix()}
-authors:
-  file: {(tmp_path / 'authors.txt').as_posix()}
-  default_domain: example.com
-convert:
-  engine: git-svn
-  default_branch: main
-target:
-  gitlab_url: https://gitlab.example.com
-  token: not-a-real-token
-  namespace: g
-  project: p
-verify:
-  mode: full
-  verify_all_branches: true
-""", encoding="utf-8")
-
-    config = load_config(config_path)
-    state = StateStore(config.workdir_path() / "state.db")
-    pipeline = build_pipelines(config, state, dry_run=True)[0]
-    outcome = pipeline.run()
-
-    assert outcome.ok, outcome.error
-    assert pipeline.engine() == "git-svn"
-    assert outcome.verification is not None and outcome.verification.ok
-    refs = git(pipeline.repo.export_dir,
-               "for-each-ref", "--format=%(refname:short)", "refs/heads/").split()
-    assert "main" in refs
 
 
 @pytest.mark.slow
 @requires_svn
-def test_pipeline_uses_the_native_engine_by_default(tmp_path, svn_repo, migration_config):
-    """`auto` must resolve to native for a local repository, whatever else is installed."""
+def test_pipeline_converts_a_repository_end_to_end(tmp_path, svn_repo, migration_config):
+    """The whole pipeline, driven by the built-in engine."""
     from svn2gitlab.config import load_config
     from svn2gitlab.pipeline import build_pipelines
     from svn2gitlab.state import StateStore
@@ -518,4 +363,3 @@ def test_pipeline_uses_the_native_engine_by_default(tmp_path, svn_repo, migratio
     pipeline = build_pipelines(config, state, dry_run=True)[0]
     outcome = pipeline.run()
     assert outcome.ok, outcome.error
-    assert pipeline.engine() == "native"

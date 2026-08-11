@@ -45,16 +45,6 @@ def test_malformed_lines_are_reported_but_do_not_lose_good_ones(tmp_path):
         AuthorMap.load(path, strict=True)
 
 
-def test_git_svn_file_has_no_comments_or_padding(tmp_path):
-    """git-svn's parser is stricter than ours; its file must be plain."""
-    amap = AuthorMap()
-    amap.set("a", Identity("A", "a@x.com"))
-    amap.set("bbbbbbbb", Identity("B", "b@x.com"))
-    path = amap.write_git_svn_file(tmp_path / "git-svn-authors.txt")
-    lines = path.read_text(encoding="utf-8").strip().splitlines()
-    assert lines == ["a = A <a@x.com>", "bbbbbbbb = B <b@x.com>"]
-
-
 @pytest.mark.parametrize("raw,expected", [
     ("CONTOSO\\bwilliams", "bwilliams"),
     ("jsmith@acme.local", "jsmith"),
@@ -109,8 +99,8 @@ def test_invalid_mapping_value_is_rejected():
         build_author_map(["jsmith"], config)
 
 
-def test_authorless_revisions_get_the_git_svn_key():
-    """git-svn looks up authorless revisions under the literal key '(no author)'."""
+def test_authorless_revisions_get_a_dedicated_key():
+    """Revisions with no svn:author are mapped under the literal key '(no author)'."""
     config = AuthorsConfig(default_domain="acme.com", no_author_name="svn")
     amap, _ = build_author_map(["", "jsmith"], config)
     assert "(no author)" in amap

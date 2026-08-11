@@ -6,11 +6,9 @@ Windows Server 2019 box that is VisualSVN Server's own `bin`; elsewhere it may b
 SlikSVN, TortoiseSVN's command-line component, CollabNet, Cygwin, or a package
 manager install.
 
-`git svn` deserves special attention. Git for Windows removed it in v2.54.0, and
-older builds implement it as a Perl script that minimal packages (MinGit) ship
-without a Perl runtime. Either way it is frequently absent, so we probe for it
-explicitly rather than discovering the problem three hours into a fetch - and the
-native engine means its absence is no longer fatal.
+We do not look for `git svn` at all. Conversion is done by this project's own
+engine, which drives `svnadmin dump` and `git fast-import`; git-svn was removed
+from Git for Windows in v2.54.0 and is not required, not used, and not reported.
 """
 
 from __future__ import annotations
@@ -76,7 +74,6 @@ class ToolInfo:
 @dataclass
 class ToolSet:
     git: ToolInfo = field(default_factory=lambda: ToolInfo("git"))
-    git_svn: ToolInfo = field(default_factory=lambda: ToolInfo("git-svn"))
     git_lfs: ToolInfo = field(default_factory=lambda: ToolInfo("git-lfs"))
     svn: ToolInfo = field(default_factory=lambda: ToolInfo("svn"))
     svnadmin: ToolInfo = field(default_factory=lambda: ToolInfo("svnadmin"))
@@ -85,7 +82,7 @@ class ToolSet:
     svnsync: ToolInfo = field(default_factory=lambda: ToolInfo("svnsync"))
 
     def all(self) -> List[ToolInfo]:
-        return [self.git, self.git_svn, self.git_lfs, self.svn,
+        return [self.git, self.git_lfs, self.svn,
                 self.svnadmin, self.svnrdump, self.svnlook, self.svnsync]
 
     def to_dict(self) -> Dict[str, object]:
@@ -118,15 +115,7 @@ class ToolSet:
 def _install_hint(missing: Sequence[str]) -> str:
     hints = []
     for name in missing:
-        if name == "git-svn":
-            hints.append(
-                "git-svn is optional: the native conversion engine needs only svnadmin. "
-                "Git for Windows removed `git svn` in v2.54.0, so on a current Windows "
-                "install it is absent whichever installer you use; upstream points at "
-                "WSL or MSYS2. The native engine needs none of that, which is why it "
-                "is the default."
-            )
-        elif name == "git":
+        if name == "git":
             hints.append(
                 "Install Git for Windows from https://git-scm.com/download/win"
                 if IS_WINDOWS else
@@ -189,36 +178,6 @@ def _probe(name: str, version_args: Sequence[str], extra_dirs: Sequence[str]) ->
     return info
 
 
-def _probe_git_svn(git: ToolInfo) -> ToolInfo:
-    """`git svn` is a subcommand, not a binary; probe it through git itself."""
-    info = ToolInfo("git-svn")
-    if not git.available or not git.path:
-        info.detail = "git itself is unavailable"
-        return info
-    result = run([git.path, "svn", "--version"], check=False, timeout=120, log_command=False)
-    text = (result.stdout or result.stderr).strip()
-    if result.returncode != 0:
-        lowered = text.lower()
-        if "perl" in lowered or "can't locate" in lowered:
-            info.detail = ("git-svn is present but its Perl runtime is broken or missing "
-                           "(minimal Git packages ship without Perl)")
-        elif "not a git command" in lowered:
-            info.detail = "this git build does not include the svn subcommand"
-        else:
-            info.detail = text.splitlines()[0] if text else f"exited {result.returncode}"
-        return info
-    info.path = f"{git.path} svn"
-    for line in text.splitlines():
-        if "git-svn version" in line:
-            info.version = line.strip()
-            break
-    else:
-        info.version = text.splitlines()[0] if text else "unknown"
-    info.version_tuple = _parse_version(info.version)
-    info.available = True
-    return info
-
-
 def detect_tools(extra_dirs: Sequence[str] = (), refresh: bool = False) -> ToolSet:
     """Locate every external tool. Result is cached unless `refresh` is set."""
     global _CACHE
@@ -230,7 +189,6 @@ def detect_tools(extra_dirs: Sequence[str] = (), refresh: bool = False) -> ToolS
 
     ts = ToolSet()
     ts.git = _probe("git", ["--version"], dirs)
-    ts.git_svn = _probe_git_svn(ts.git)
     ts.git_lfs = _probe("git-lfs", ["version"], dirs)
     ts.svn = _probe("svn", ["--version", "--quiet"], dirs)
     ts.svnadmin = _probe("svnadmin", ["--version", "--quiet"], dirs)

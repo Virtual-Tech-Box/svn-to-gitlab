@@ -88,19 +88,22 @@ def make_svn_repo(root: Path, tools) -> Path:
     _run([svn, "checkout", "-q", f"{url}/trunk", str(work)])
 
     (work / "src").mkdir()
-    (work / "src" / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    # write_bytes, not write_text: on Windows text mode rewrites \n to \r\n, which
+    # would make the fixture repository - and therefore every converted tree - differ
+    # by platform. The golden master caught exactly that.
+    (work / "src" / "app.py").write_bytes(b"print('hello')\n")
     (work / "binary.dat").write_bytes(bytes(range(256)) * 64)
     _run([svn, "add", "-q", "src", "binary.dat"], cwd=work)
     _run([svn, "propset", "-q", "svn:ignore", "*.pyc\nbuild/", "."], cwd=work)
     _run([svn, "commit", "-q", "-m", "Initial import"], cwd=work)
 
-    (work / "src" / "app.py").write_text("print('hello, world')\n", encoding="utf-8")
+    (work / "src" / "app.py").write_bytes(b"print('hello, world')\n")
     _run([svn, "commit", "-q", "-m", "Improve the greeting"], cwd=work)
 
     _run([svn, "copy", "-q", "-m", "branch", f"{url}/trunk", f"{url}/branches/feature-a"])
     _run([svn, "copy", "-q", "-m", "tag 1.0", f"{url}/trunk", f"{url}/tags/v1.0"])
 
-    (work / "LICENSE").write_text("MIT\n", encoding="utf-8")
+    (work / "LICENSE").write_bytes(b"MIT\n")
     _run([svn, "add", "-q", "LICENSE"], cwd=work)
     _run([svn, "commit", "-q", "-m", "Add the licence"], cwd=work)
 

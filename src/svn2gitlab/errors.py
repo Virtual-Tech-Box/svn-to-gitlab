@@ -26,7 +26,7 @@ class ConfigError(Svn2GitlabError):
 
 
 class ToolMissingError(Svn2GitlabError):
-    """A required external executable (svn, git, git-svn, git-lfs) was not found."""
+    """A required external executable (git, svn, svnadmin, git-lfs) was not found."""
 
 
 class CommandError(Svn2GitlabError):
@@ -51,7 +51,7 @@ class SvnError(Svn2GitlabError):
 
 
 class ConversionError(Svn2GitlabError):
-    """git-svn / history rewrite failure."""
+    """Conversion or history-rewrite failure."""
 
 
 class GitLabError(Svn2GitlabError):

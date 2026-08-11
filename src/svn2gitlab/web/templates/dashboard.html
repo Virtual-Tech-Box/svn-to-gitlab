@@ -156,7 +156,7 @@ async function loadMeta() {
   $("version").textContent = "v" + meta.version;
   $("configpath").textContent = meta.config_path || "no config file";
   const missing = Object.values(meta.tools).filter(t => !t.available).map(t => t.name);
-  const core = ["git","git-svn","svn"].filter(n => missing.includes(n));
+  const core = ["git","svn","svnadmin"].filter(n => missing.includes(n));
   $("tools").textContent = core.length ? ("missing: " + core.join(", "))
     : (missing.length ? ("optional missing: " + missing.join(", ")) : "tools ready");
   $("tools").className = "badge " + (core.length ? "bad" : "ok");

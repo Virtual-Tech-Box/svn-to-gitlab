@@ -34,9 +34,6 @@ authors:
   policy: generate
 
 convert:
-  # The native engine needs no Perl and is far faster than git-svn. `auto` uses it
-  # wherever a local repository is available and falls back to git-svn otherwise.
-  engine: auto                          # auto | native | git-svn
   default_branch: main
   strip_svn_metadata: true
   keep_revision_trailer: true
