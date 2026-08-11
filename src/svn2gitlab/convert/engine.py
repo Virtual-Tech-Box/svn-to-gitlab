@@ -53,8 +53,9 @@ def resolve_engine(requested: ConversionEngine, tools: ToolSet,
         if not tools.git_svn.available:
             raise ConversionError(
                 f"convert.engine is `git-svn` but it is unusable: {tools.git_svn.detail}",
-                "Install Git for Windows with its standard installer (MinGit omits "
-                "Perl), or switch to `convert.engine: native`, which needs neither.",
+                "Git for Windows removed `git svn` in v2.54.0, so on Windows this "
+                "engine needs WSL or MSYS2. Switch to `convert.engine: native`, "
+                "which requires neither.",
             )
         return "git-svn"
 

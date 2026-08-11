@@ -7,6 +7,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-11
+
+Fixes a release-blocking problem on Windows. Git for Windows removed `git svn` in
+v2.54.0, so it is absent from every current Windows install — and 1.0.0 treated it
+as mandatory, refusing to run on the very platform this tool targets. 1.0.1 removes
+the dependency entirely.
+
 ### Fixed
 
 - `git-svn` is no longer a hard requirement. `doctor` previously failed, and the
@@ -23,6 +30,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- Golden-master trees: the exact Git tree objects the fixture must produce are
+  pinned in `tests/test_golden_master.py`, verified byte-identical to git-svn and
+  reproducible across runs. Correctness no longer depends on having a deprecated
+  tool available to compare against, and CI no longer holds git back to an old
+  release to keep one installable.
 - **A native conversion engine that does not need `git-svn` or Perl.** It reads an
   `svnadmin dump` and writes a `git fast-import` stream, converting roughly an order
   of magnitude faster than git-svn's one-round-trip-per-revision design. It is now
@@ -121,5 +133,6 @@ inheritance of shared settings and optional parallel execution.
 - Re-derived history can require a force push when history rewriting (LFS or
   metadata stripping) is enabled. Safe before cutover only.
 
-[Unreleased]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/commits/main
+[Unreleased]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Virtual-Tech-Box/svn-to-gitlab/releases

@@ -12,7 +12,7 @@
 
 #define AppName        "svn2gitlab"
 #define AppURL         "https://github.com/Virtual-Tech-Box/svn-to-gitlab"
-#define AppVersion     "1.0.0"
+#define AppVersion     "1.0.1"
 #define AppPublisher   "Virtual Tech Box"
 #define AppExeName     "svn2gitlab.exe"
 #define SourceDir      "..\dist\svn2gitlab"

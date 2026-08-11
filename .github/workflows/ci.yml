@@ -14,10 +14,11 @@ permissions:
   contents: read
 
 jobs:
-  # Full suite including real SVN -> Git conversions, and the only platform with
-  # git-svn installed: it therefore carries the Python version matrix, the git-svn
-  # engine tests and the native-vs-git-svn tree equivalence comparison. macOS and
-  # Windows deliberately run without git-svn to prove the native engine stands alone.
+  # Full suite including real SVN -> Git conversions, across the supported Python
+  # versions. No platform installs git-svn any more: it is not needed to convert,
+  # Git for Windows removed it in v2.54.0, and keeping it installable here meant
+  # pinning git to an old release. The native engine's output is locked down by the
+  # golden-master trees instead.
   test-linux:
     name: Linux / Python ${{ matrix.python }}
     runs-on: ubuntu-latest
@@ -33,31 +34,18 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
 
-      - name: Install Subversion and git-svn
+      - name: Install Subversion
         run: |
           set -euxo pipefail
-          # The runner preinstalls git from ppa:git-core/ppa (2.5x), but Ubuntu builds
-          # git-svn against the distro git (2.43) and pins `Depends: git (< 2.43.0-.)`,
-          # so apt cannot satisfy both. Removing the PPA is not enough on its own —
-          # the newer git stays installed and apt will not downgrade it implicitly —
-          # so pin git and git-man back to the distro version explicitly.
-          sudo rm -f /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.list \
-                     /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources
-          sudo add-apt-repository --remove -y ppa:git-core/ppa || true
+          # Modern git, as shipped by the runner. We deliberately do NOT hold git
+          # back to a version old enough to satisfy Ubuntu's git-svn package: the
+          # native engine does not use git-svn, and testing against a git nobody
+          # runs would be worse than useless. Correctness is anchored by
+          # tests/test_golden_master.py, which pins the exact trees the conversion
+          # must produce.
           sudo apt-get update
-          # With the PPA gone, the first madison entry is the newest distro version.
-          # Parsing by field rather than by URL: the runners resolve archives through
-          # a mirrorlist, so the source column is not reliably *.ubuntu.com.
-          GIT_VER=$(apt-cache madison git | awk -F'|' 'NR==1 {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}')
-          test -n "${GIT_VER}" || { echo "could not resolve a distro git version"; exit 1; }
-          echo "pinning git to the distro version: ${GIT_VER}"
-          sudo apt-get install -y --allow-downgrades \
-            git="${GIT_VER}" git-man="${GIT_VER}" git-svn subversion git-lfs
-
-      - name: Verify git-svn is usable
-        run: |
+          sudo apt-get install -y subversion git-lfs
           git --version
-          git svn --version
 
       - name: Install the package
         run: pip install -e ".[dev]"
@@ -83,8 +71,6 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      # Deliberately no git-svn, like Windows: a second platform proving the native
-      # engine stands alone. Linux carries the git-svn coverage.
       - name: Install Subversion
         run: brew install subversion git-lfs
       - run: pip install -e ".[dev]"
@@ -128,8 +114,6 @@ jobs:
 
       # A real gate. `doctor` exits non-zero when a required tool is missing, and a
       # Windows job that cannot convert a repository must not report success.
-      # Note Windows deliberately has no git-svn here: the native engine needs only
-      # svn/svnadmin, so this also proves the tool works without Perl.
       - name: Check the toolchain
         run: svn2gitlab doctor
 

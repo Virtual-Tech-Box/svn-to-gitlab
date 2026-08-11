@@ -6,9 +6,11 @@ Windows Server 2019 box that is VisualSVN Server's own `bin`; elsewhere it may b
 SlikSVN, TortoiseSVN's command-line component, CollabNet, Cygwin, or a package
 manager install.
 
-`git svn` deserves special attention: it is a Perl script, and the *MinGit* build
-that ships inside some installers omits Perl entirely. We probe for it explicitly
-rather than discovering the problem three hours into a fetch.
+`git svn` deserves special attention. Git for Windows removed it in v2.54.0, and
+older builds implement it as a Perl script that minimal packages (MinGit) ship
+without a Perl runtime. Either way it is frequently absent, so we probe for it
+explicitly rather than discovering the problem three hours into a fetch - and the
+native engine means its absence is no longer fatal.
 """
 
 from __future__ import annotations
@@ -119,17 +121,17 @@ def _install_hint(missing: Sequence[str]) -> str:
         if name == "git-svn":
             hints.append(
                 "git-svn is optional: the native conversion engine needs only svnadmin. "
-                "Install it only if you must convert directly from a remote URL without "
-                "mirroring first - on Windows that means Git for Windows' standard "
-                "installer, since MinGit omits the Perl git-svn requires."
+                "Git for Windows removed `git svn` in v2.54.0, so on a current Windows "
+                "install it is absent whichever installer you use; upstream points at "
+                "WSL or MSYS2. The native engine needs none of that, which is why it "
+                "is the default."
             )
         elif name == "git":
             hints.append(
-                "Install Git for Windows (full installer, not MinGit) from https://git-scm.com/download/win "
-                "- the standard installer includes Perl, which `git svn` requires."
+                "Install Git for Windows from https://git-scm.com/download/win"
                 if IS_WINDOWS else
-                "Install git and the git-svn package (Debian/Ubuntu: apt install git git-svn; "
-                "RHEL: dnf install git git-svn; macOS: git-svn ships with Xcode CLT or `brew install git`)."
+                "Install git (Debian/Ubuntu: apt install git; RHEL: dnf install git; "
+                "macOS: brew install git)."
             )
         elif name == "git-lfs":
             hints.append("Install Git LFS from https://git-lfs.com (or disable `lfs.enabled` in the config).")
@@ -199,7 +201,7 @@ def _probe_git_svn(git: ToolInfo) -> ToolInfo:
         lowered = text.lower()
         if "perl" in lowered or "can't locate" in lowered:
             info.detail = ("git-svn is present but its Perl runtime is broken or missing "
-                           "(MinGit and some minimal packages omit Perl)")
+                           "(minimal Git packages ship without Perl)")
         elif "not a git command" in lowered:
             info.detail = "this git build does not include the svn subcommand"
         else:
