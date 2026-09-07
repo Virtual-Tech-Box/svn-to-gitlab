@@ -26,6 +26,7 @@ nine, not hour zero.
 
 | | |
 | --- | --- |
+| **Sources** | Subversion, and Team Foundation Version Control (TFS 2015+ / Azure DevOps Server / Azure DevOps Services). |
 | **SVN sources** | VisualSVN Server, Apache `mod_dav_svn`, `svnserve`, `svn+ssh`, a repository on local disk, or a hosted provider. Any of `http`, `https`, `svn`, `svn+ssh`, `file`. |
 | **SVN layouts** | Standard `trunk`/`branches`/`tags`, non-standard directory names, nested branches (`branches/team/feature`), flat repositories with no layout at all, and one-repository-many-projects. Detected automatically; overridable. |
 | **GitLab targets** | gitlab.com SaaS and any self-managed instance, including behind a private CA. Personal, group, project or OAuth tokens. |
@@ -73,6 +74,47 @@ anything that is not.
 engine. That is deliberate: Git for Windows removed `git svn` in v2.54.0, citing
 persistent maintenance challenges, so on a current Windows install it is absent
 whichever installer you choose.
+
+### Migrating from TFS (TFVC)
+
+Set `source.kind: tfvc` and point at the collection:
+
+```yaml
+source:
+  kind: tfvc
+  url: https://tfs.acme.local/tfs
+  collection: DefaultCollection
+  project: Payments
+  token: env:TFS_TOKEN        # personal access token, Code (read) scope
+```
+
+History is read entirely over the REST API, so this runs from any machine that can
+reach the TFS application tier — no Visual Studio, no `tf.exe`, nothing Windows-only.
+Changesets become commits, TFVC branches become Git branches, and everything after
+the conversion — export, LFS, GitLab push, verification, incremental sync — is the
+same code path as Subversion.
+
+Verification works the same way too: each file is fetched from TFVC at the migrated
+changeset and compared by Git blob hash, with the item's MD5 checked first so a
+truncated download is caught rather than reported as a content difference.
+
+What differs from Subversion, and is reported in the analysis:
+
+- **No tags.** TFVC has no tag concept; labels are the nearest equivalent and are
+  not migrated. Recreate the important ones as Git tags afterwards.
+- **Merges are not reconstructed.** A merge changeset becomes an ordinary commit
+  holding the merged content. File content is correct; branch topology is
+  simplified. This matches how `svn:mergeinfo` is handled.
+- **No ignore translation.** TFVC has no ignore property. `.tfignore` files are
+  ordinary versioned files and migrate as content.
+- **Branch detection matters.** If a project branched by copying a folder without
+  converting it to a TFVC branch, there are no branch definitions to read and roots
+  are inferred from path conventions. The analysis says which happened — check it,
+  and set `source.branch_roots` explicitly if it guessed wrong.
+- **The cutover lock is Subversion-only.** For TFVC, deny "Check in" on the team
+  project in TFS at cutover.
+
+See [`examples/tfs-tfvc-to-gitlab.yaml`](examples/tfs-tfvc-to-gitlab.yaml).
 
 ### How conversion works
 

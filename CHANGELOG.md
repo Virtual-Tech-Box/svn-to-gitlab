@@ -7,6 +7,29 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **TFVC support: migrate from TFS to GitLab.** `source.kind: tfvc` reads a Team
+  Foundation Version Control history over the REST API (TFS 2015/2017/2018, Azure
+  DevOps Server and Services) and converts changesets into Git commits with the same
+  fast-import writer the Subversion engine uses. Everything downstream — export, LFS,
+  GitLab push, byte-for-byte verification and incremental sync — is shared, not
+  duplicated.
+
+  REST is used deliberately rather than `tf.exe` or the .NET client libraries, so
+  the migrator stays cross-platform and free of Windows-only dependencies.
+
+  Three documented API behaviours are handled explicitly because each silently
+  corrupts a migration otherwise: comments truncate to 80 characters by default,
+  `changeType` is a comma-separated flags enum where `rename, edit` means both, and
+  `hashValue` is a base64 MD5. Branch creation is resolved with fast-import's `ls`
+  rather than replaying the per-file `branch` changes TFVC emits, so branching a
+  large tree costs one operation instead of re-downloading it.
+
+  Not migrated, and reported in the analysis: TFVC labels (no Git equivalent), merge
+  topology (content is correct, branch shape is simplified), and ignore rules. The
+  cutover lock remains Subversion-only; for TFVC deny "Check in" in TFS.
+
 ## [1.0.1] - 2026-08-11
 
 Fixes a release-blocking problem on Windows. Git for Windows removed `git svn` in

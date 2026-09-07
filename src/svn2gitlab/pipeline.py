@@ -20,7 +20,7 @@ from threading import Event
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from .config import (AuthorPolicy, FastPath, MigrationConfig, ResolvedRepo,
-                     VerifyMode)
+                     SourceKind, VerifyMode)
 from .convert.export import ExportResult, Exporter
 from .convert.git import Git
 from .convert.engine import build_mirror
@@ -132,6 +132,7 @@ class MigrationPipeline:
         self._analysis: Optional[RepoAnalysis] = None
         self._authors: Optional[AuthorMap] = None
         self._acquisition: Optional[acquire_mod.Acquisition] = None
+        self._tfvc = None
         self._current_stage = ""
 
     # -- shared components ---------------------------------------------------
@@ -148,6 +149,29 @@ class MigrationPipeline:
                 cancel=self.cancel,
             )
         return self._svn
+
+    @property
+    def is_tfvc(self) -> bool:
+        return self.repo.source.kind == SourceKind.TFVC
+
+    @property
+    def tfvc(self):
+        """The TFVC client, built lazily and shared across stages."""
+        if getattr(self, "_tfvc", None) is None:
+            from .tfvc.client import TfvcClient
+            source = self.repo.source
+            self._tfvc = TfvcClient(
+                base_url=source.url or "",
+                collection=source.collection or "",
+                project=source.project or "",
+                token=source.token,
+                username=source.username,
+                password=source.password,
+                verify_tls=source.verify_tls,
+                ca_bundle=source.ca_bundle,
+                cancel=self.cancel,
+            )
+        return self._tfvc
 
     @property
     def gitlab(self) -> GitLabClient:
@@ -203,6 +227,10 @@ class MigrationPipeline:
         reads as "do not filter" - degrading to publishing a stale branch is far
         better than silently dropping every branch.
         """
+        if self.is_tfvc:
+            # The converter only ever creates refs for configured branch roots, so
+            # there is no equivalent of git-svn's stale-ref problem to filter.
+            return None, None
         try:
             probe = RepoAnalysis()
             collect_refs(self.svn, self.source_url(), self.mirror.layout, probe)
@@ -231,6 +259,25 @@ class MigrationPipeline:
             layout = self.analysis.layout
             if not layout.trunk and not layout.branches and not layout.tags:
                 layout = layout_for_source(self.svn, self.repo.source, self.source_url())
+            if self.is_tfvc:
+                from .tfvc.mirror import TfvcMirror
+                from .tfvc.convert import detect_layout
+                source = self.repo.source
+                declared = list(source.branch_roots) or [
+                    b.get("path") for b in self.tfvc.branches() if b.get("path")]
+                tfvc_layout = detect_layout(source.tfvc_project_root(), declared)
+                self._mirror = TfvcMirror(
+                    tools=self.tools,
+                    repo_dir=self.repo.mirror_dir,
+                    client=self.tfvc,
+                    layout=tfvc_layout,
+                    convert=self.repo.convert,
+                    authors=self._authors or AuthorMap.load(self.repo.authors_file),
+                    collection_url=f"{source.url or ''}/{source.collection or ''}".rstrip("/"),
+                    default_domain=self.repo.authors.default_domain,
+                    cancel=self.cancel,
+                )
+                return self._mirror
             self._mirror = build_mirror(
                 tools=self.tools,
                 repo_dir=self.repo.mirror_dir,
@@ -396,12 +443,14 @@ class MigrationPipeline:
         problems: List[str] = []
         warnings: List[str] = []
 
-        for name in ("git", "svn"):
+        required = ("git",) if self.is_tfvc else ("git", "svn")
+        for name in required:
             info = getattr(self.tools, name.replace("-", "_"))
             if not info.available:
                 problems.append(f"{name}: {info.detail or 'not found'}")
-        # svnadmin drives the conversion: it produces the dump the converter reads.
-        if not self.tools.svnadmin.available:
+        # svnadmin drives the Subversion conversion: it produces the dump the
+        # converter reads. TFVC reads over HTTP and needs no Subversion tooling.
+        if not self.is_tfvc and not self.tools.svnadmin.available:
             problems.append(f"svnadmin: {self.tools.svnadmin.detail or 'not found'}")
         if self.repo.convert.lfs.enabled and not self.tools.git_lfs.available:
             problems.append(f"git-lfs: {self.tools.git_lfs.detail or 'not found'} "
@@ -411,9 +460,19 @@ class MigrationPipeline:
                                    + "\n  - ".join(problems),
                                    "Run `svn2gitlab doctor` for install instructions.")
 
-        self._progress(0.3, "checking Subversion connectivity")
-        info = self.svn.info(self.source_url())
-        head = info.revision
+        if self.is_tfvc:
+            self._progress(0.3, "checking TFS connectivity")
+            api_version = self.tfvc.probe()
+            head = self.tfvc.changeset_count_hint(self.repo.source.tfvc_project_root())
+            log.info("TFS reachable, api-version %s, newest changeset %s",
+                     api_version, head)
+            if not head:
+                problems.append(
+                    f"no changesets found under {self.repo.source.tfvc_project_root()}")
+        else:
+            self._progress(0.3, "checking Subversion connectivity")
+            info = self.svn.info(self.source_url())
+            head = info.revision
 
         self._progress(0.5, "checking disk space")
         estimated = 0
@@ -445,10 +504,21 @@ class MigrationPipeline:
         self._progress(1.0, "preflight passed")
         for warning in warnings:
             log.warning("%s", warning)
+        if self.is_tfvc:
+            source_info = {"kind": "tfvc", "url": self.repo.source.url or "",
+                           "root": self.repo.source.tfvc_project_root(),
+                           "api_version": self.tfvc.api_version,
+                           "head_revision": head}
+        else:
+            source_info = {"kind": "svn", "url": info.url,
+                           "root": info.repository_root,
+                           "uuid": info.repository_uuid, "head_revision": head}
         return {
             "tools": self.tools.to_dict(),
-            "svn": {"url": info.url, "root": info.repository_root, "uuid": info.repository_uuid,
-                    "head_revision": head},
+            "source": source_info,
+            # Kept under the old key too so existing reports and the dashboard, which
+            # read `svn`, keep working for both source kinds.
+            "svn": source_info,
             "gitlab": gitlab_info,
             "disk_free": free,
             "disk_estimated": needed,
@@ -456,6 +526,25 @@ class MigrationPipeline:
         }
 
     def _stage_analyze(self) -> Dict[str, Any]:
+        if self.is_tfvc:
+            from .tfvc.analyze import analyse as analyse_tfvc
+            analysis = analyse_tfvc(
+                self.tfvc, self.repo.source,
+                lfs_enabled=self.repo.convert.lfs.enabled,
+                lfs_threshold_bytes=self.repo.convert.lfs.size_threshold_mb * 1024 * 1024,
+                known_authors=AuthorMap.load(self.repo.authors_file).as_dict(),
+                on_progress=self._progress,
+            )
+            analysis.analysed_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            self._analysis = analysis
+            data = analysis.to_dict()
+            try:
+                self.analysis_path.write_text(json.dumps(data, indent=2, default=str),
+                                              encoding="utf-8")
+            except OSError as exc:
+                log.warning("could not write %s: %s", self.analysis_path, exc)
+            return data
+
         url = self.source_url()
         analysis = RepoAnalysis(url=url, analysed_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
 
@@ -563,6 +652,11 @@ class MigrationPipeline:
         }
 
     def _stage_acquire(self) -> Dict[str, Any]:
+        if self.is_tfvc:
+            self._progress(1.0, "TFVC history is read over HTTP; nothing to acquire")
+            return {"strategy": "rest", "url": self.repo.source.url or "",
+                    "note": "TFVC changesets are fetched from the REST API directly"}
+
         estimated = 0
         if self.repo.source.local_path:
             estimated = acquire_mod._dir_size(Path(self.repo.source.local_path))
@@ -792,6 +886,15 @@ class MigrationPipeline:
 
         # Content verification, branch by branch.
         branches = self._branches_to_verify(git, config)
+
+        if self.is_tfvc:
+            self._verify_tfvc_branches(git, mirror, config, branches, report, on_progress)
+            report.duration = time.time() - started
+            if on_progress:
+                on_progress(1.0, "verification complete" if report.ok
+                            else f"{report.total_differences} difference(s) found")
+            return report
+
         verifier = Verifier(
             git=git, svn=self.svn, svn_base_url=self.convert_url(), cancel=self.cancel,
             normalize_eol=config.normalize_eol, max_reported=config.max_reported_diffs,
@@ -816,6 +919,65 @@ class MigrationPipeline:
             on_progress(1.0, "verification complete" if report.ok
                         else f"{report.total_differences} difference(s) found")
         return report
+
+    def _verify_tfvc_branches(self, git: Git, mirror, config, branches, report,
+                              on_progress) -> None:
+        """Compare each migrated branch with TFVC at the changeset it was built from."""
+        from .tfvc.verify import verify_branch as verify_tfvc_branch
+
+        for index, (branch, _path) in enumerate(branches, 1):
+            self._check_cancel()
+            if on_progress:
+                on_progress((index - 1) / max(1, len(branches)),
+                            f"verifying {branch} ({index} of {len(branches)})")
+
+            key = mirror.mapper.key_for(mirror.layout.main_root) \
+                if branch == self.repo.convert.default_branch else branch
+            branch_root = next(
+                (r for r in mirror.layout.branch_roots
+                 if mirror.mapper.branch_name(mirror.mapper.key_for(r)) == branch),
+                mirror.layout.main_root)
+
+            mirror_ref = f"{mirror.fmt.ref_root}{branch}"
+            changeset = mirror.revision_of(mirror_ref) or 0
+            if not changeset:
+                record = BranchVerification(branch=branch, git_ref=branch)
+                record.skipped = True
+                record.note = ("no changeset trailer on this branch, so there is "
+                               "nothing to compare against")
+                report.branches.append(record)
+                continue
+
+            tree = self._git_tree_for(git, f"refs/heads/{branch}")
+            record = verify_tfvc_branch(
+                client=self.tfvc,
+                git_tree=tree,
+                read_blob=lambda sha: git.cat_file(sha),
+                branch=branch,
+                branch_root=branch_root,
+                changeset=changeset,
+                normalize_eol=config.normalize_eol,
+                max_reported=config.max_reported_diffs,
+                on_progress=lambda f, m, i=index: on_progress and on_progress(
+                    (i - 1 + f) / max(1, len(branches)), m),
+            )
+            report.branches.append(record)
+
+    @staticmethod
+    def _git_tree_for(git: Git, ref: str) -> Dict[str, tuple]:
+        """path -> (mode, blob sha) for every file in a ref."""
+        listing = git.run(["ls-tree", "-r", "-z", ref]).stdout
+        tree: Dict[str, tuple] = {}
+        for entry in listing.split("\0"):
+            if not entry.strip():
+                continue
+            meta, _, path = entry.partition("\t")
+            parts = meta.split()
+            if len(parts) < 3:
+                continue
+            mode, _kind, sha = parts[0], parts[1], parts[2]
+            tree[path] = (mode, sha)
+        return tree
 
     def _branches_to_verify(self, git: Git, config) -> List[tuple]:
         """(git branch, svn path) pairs to compare."""

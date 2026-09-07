@@ -186,10 +186,18 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def normalised_blob_hash_bytes(data: bytes) -> str:
+    """Git blob hash after collapsing CRLF to LF.
+
+    Used to tell an eol-only difference apart from real data loss. TFVC content
+    arrives in memory rather than as an exported file, hence the bytes variant.
+    """
+    return git_blob_hash(data.replace(b"\r\n", b"\n"))
+
+
 def normalised_blob_hash(path: Path) -> str:
     """Git blob hash after collapsing CRLF to LF - used to explain eol-only differences."""
-    data = path.read_bytes().replace(b"\r\n", b"\n")
-    return git_blob_hash(data)
+    return normalised_blob_hash_bytes(path.read_bytes())
 
 
 def looks_binary(data: bytes) -> bool:

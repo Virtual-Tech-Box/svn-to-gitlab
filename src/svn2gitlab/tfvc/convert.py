@@ -58,6 +58,23 @@ class TfvcLayout:
     main_root: str = ""
     detected_from: str = ""
 
+    # -- DetectedLayout-compatible surface ------------------------------------
+    # The exporter reads `layout.tags`/`.trunk`/`.branches` without caring which
+    # source produced the mirror, so those names are answered here too.
+
+    @property
+    def tags(self) -> List[str]:
+        """TFVC has no tags. Labels are the nearest thing and are not migrated."""
+        return []
+
+    @property
+    def trunk(self) -> str:
+        return self.main_root
+
+    @property
+    def branches(self) -> List[str]:
+        return [r for r in self.branch_roots if r != self.main_root]
+
     def to_dict(self) -> dict:
         return {"project_root": self.project_root, "main_root": self.main_root,
                 "branch_roots": self.branch_roots, "detected_from": self.detected_from}

@@ -359,3 +359,104 @@ def test_paths_outside_the_layout_are_reported_not_silently_dropped(tmp_path):
             list(client.iter_changesets()))
     assert result.skipped_paths == 1, "a path outside the layout was not accounted for"
     assert not exists(repo, "refs/remotes/tfvc/main", "b.txt")
+
+
+# --------------------------------------------------------------------------- #
+# Whole pipeline: TFVC -> GitLab
+# --------------------------------------------------------------------------- #
+
+def git_http_backend_available() -> bool:
+    from fake_gitlab import find_git_http_backend
+    return find_git_http_backend(GIT) is not None
+
+
+@pytest.mark.skipif(not git_http_backend_available(),
+                    reason="git-http-backend is required to serve the fake GitLab")
+def test_tfvc_migrates_to_gitlab_and_verifies(tmp_path, tfs):
+    """The whole point: a TFVC project ends up in GitLab, proven byte-for-byte."""
+    from fake_gitlab import FakeGitLab
+    from svn2gitlab.config import load_config
+    from svn2gitlab.pipeline import build_pipelines
+    from svn2gitlab.state import StateStore
+
+    with FakeGitLab(tmp_path / "gitlab", GIT) as gitlab:
+        authors = tmp_path / "authors.txt"
+        authors.write_text(
+            "CONTOSO\\alice = Alice <alice@contoso.com>\n"
+            "CONTOSO\\bob = Bob <bob@contoso.com>\n"
+            "CONTOSO\\carol = Carol <carol@contoso.com>\n", encoding="utf-8")
+
+        config_path = tmp_path / "tfvc.yaml"
+        config_path.write_text(f"""
+version: 1
+name: tfsdemo
+workdir: {(tmp_path / 'work').as_posix()}
+source:
+  kind: tfvc
+  url: {tfs.url}
+  collection: DefaultCollection
+  project: DemoProject
+  token: {tfs.token}
+authors:
+  file: {authors.as_posix()}
+  default_domain: contoso.com
+convert:
+  default_branch: main
+  strip_svn_metadata: true
+  generate_gitignore: false
+target:
+  gitlab_url: {gitlab.url}
+  token: {gitlab.token}
+  namespace: acme
+  project: demo
+verify:
+  mode: full
+  verify_all_branches: true
+""", encoding="utf-8")
+
+        config = load_config(config_path)
+        state = StateStore(config.workdir_path() / "state.db")
+        pipeline = build_pipelines(config, state, dry_run=False)[0]
+        outcome = pipeline.run()
+
+        assert outcome.ok, outcome.error
+
+        # It arrived in GitLab.
+        refs = gitlab.refs("acme/demo")
+        assert "refs/heads/main" in refs
+        assert "refs/heads/Release-1.0" in refs
+
+        # And a clone gives real files back.
+        clone = tmp_path / "clone"
+        result = subprocess.run(
+            [GIT, "clone", "-q", f"{gitlab.url}/acme/demo.git", str(clone)],
+            capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        assert (clone / "src" / "program.cs").read_bytes() == \
+            b"class Program { void Run() {} }\n"
+        assert (clone / "assets" / "logo.bin").read_bytes() == bytes(range(256)) * 4
+
+        # Verification compared against TFVC and found nothing wrong.
+        assert outcome.verification is not None
+        assert outcome.verification.ok, [
+            d.to_dict() for b in outcome.verification.branches for d in b.differences]
+        assert any(b.files_compared > 0 for b in outcome.verification.branches)
+
+
+@pytest.mark.skipif(not git_http_backend_available(), reason="git-http-backend required")
+def test_tfvc_verification_detects_tampering(tmp_path, tfs):
+    """A verification that cannot fail proves nothing."""
+    from svn2gitlab.tfvc.verify import verify_branch
+    from svn2gitlab.verify.verify import git_blob_hash
+
+    client = TfvcClient(tfs.url, collection="DefaultCollection", project="DemoProject",
+                        token=tfs.token)
+    client.probe()
+
+    # A tree claiming content that TFVC does not have.
+    wrong = b"tampered\n"
+    tree = {"src/program.cs": ("100644", git_blob_hash(wrong))}
+    record = verify_branch(client, tree, lambda _sha: wrong, "main",
+                           "$/DemoProject/Main", changeset=7)
+    assert record.differences, "tampered content was reported as matching"
+    assert any(d.kind == "content" for d in record.differences)
