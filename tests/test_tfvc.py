@@ -432,8 +432,16 @@ verify:
             [GIT, "clone", "-q", f"{gitlab.url}/acme/demo.git", str(clone)],
             capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
-        assert (clone / "src" / "program.cs").read_bytes() == \
+
+        # Assert on the *stored* bytes, not the checked-out file. Git converts line
+        # endings in the working tree when core.autocrlf is on, which it is by
+        # default on Windows - that is a checkout preference, not what was migrated,
+        # and comparing the working tree would make this test fail on Windows for a
+        # migration that is entirely correct.
+        assert blob(clone, "HEAD", "src/program.cs") == \
             b"class Program { void Run() {} }\n"
+        assert blob(clone, "HEAD", "assets/logo.bin") == bytes(range(256)) * 4
+        # The binary must survive checkout untouched whatever the eol setting.
         assert (clone / "assets" / "logo.bin").read_bytes() == bytes(range(256)) * 4
 
         # Verification compared against TFVC and found nothing wrong.
@@ -460,3 +468,24 @@ def test_tfvc_verification_detects_tampering(tmp_path, tfs):
                            "$/DemoProject/Main", changeset=7)
     assert record.differences, "tampered content was reported as matching"
     assert any(d.kind == "content" for d in record.differences)
+
+
+def test_migrated_repositories_pin_line_endings(tmp_path, tfs):
+    """Repositories we create must disable autocrlf.
+
+    Everything the tool guarantees about reproducibility assumes the bytes written
+    are the bytes stored. If Git were free to translate line endings, a conversion
+    run on Windows and the same conversion run on Linux would produce different
+    blobs - and the golden master, the byte-for-byte verification and the
+    fast-forward push would all quietly stop meaning what they claim.
+    """
+    from svn2gitlab.convert.git import Git
+    from svn2gitlab.tools import detect_tools
+
+    repo = tmp_path / "cfgcheck"
+    git_wrapper = Git(detect_tools(), repo)
+    git_wrapper.init(initial_branch="main")
+    git_wrapper.apply_base_config()
+
+    assert git_wrapper.config_get("core.autocrlf") == "false"
+    assert git_wrapper.config_get("core.safecrlf") == "false"
