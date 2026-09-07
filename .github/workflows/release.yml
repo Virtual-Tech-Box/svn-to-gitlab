@@ -39,6 +39,22 @@ jobs:
       - name: Smoke-test the frozen binary
         run: .\dist\svn2gitlab\svn2gitlab.exe version
 
+      - name: Check the pinned prerequisite URL still resolves
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The installer offers to download Git for Windows when it is missing. A
+          # stale URL must fail here, loudly, rather than at a customer site.
+          $iss = Get-Content installer\svn2gitlab.iss -Raw
+          if ($iss -notmatch "GitInstallerUrl\s*=\s*'([^']+)'\s*\+\s*'([^']+)'") {
+            throw "could not find GitInstallerUrl in the installer script"
+          }
+          $url = $Matches[1] + $Matches[2]
+          Write-Host "checking $url"
+          $response = Invoke-WebRequest -Uri $url -Method Head -MaximumRedirection 5
+          if ($response.StatusCode -ne 200) { throw "prerequisite URL returned $($response.StatusCode)" }
+          Write-Host "prerequisite URL OK"
+
       - name: Build the installer
         shell: pwsh
         run: |
@@ -118,6 +134,9 @@ jobs:
           # so the artifacts would appear to be missing. The build only reaches this
           # step after the tests and the installer build have passed.
           draft: false
+          # Anything with a suffix (-rc1, -beta) is published as a prerelease, so a
+          # build cut for testing is never mistaken for a general release.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
@@ -134,7 +153,18 @@ jobs:
 
             **Any platform** — `pip install svn2gitlab-<version>-py3-none-any.whl`
 
-            Then run `svn2gitlab doctor` to check for Git, git-svn and Subversion.
+            The installer offers to download and install **Git for Windows** if it
+            is missing. Nothing else is required for a TFS/TFVC migration.
+
+            ### Prerequisites
+
+            | Migrating from | You need |
+            | --- | --- |
+            | **TFS / Azure DevOps (TFVC)** | Git only. History is read over HTTPS. |
+            | **Subversion** | Git, plus `svn` and `svnadmin`. On a VisualSVN Server host these are already in `C:\Program Files\VisualSVN Server\bin`. |
+
+            Run `svn2gitlab doctor` after installing: it reports which kinds of
+            migration this machine can run, and exactly what any of them is missing.
 
             > The Windows binaries are **not code-signed**. SmartScreen will warn on
             > first run. `SHA256SUMS.txt` is attached, and the values are printed in
