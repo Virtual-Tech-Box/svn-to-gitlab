@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows installer refused to run on **Windows Server 2016**. Its minimum OS
+  was set to build 10.0.17763 (Server 2019) when nothing in the tool needs anything
+  newer; the gate is now 10.0.14393, which is Server 2016 / Windows 10 1607.
+
 ### Added
 
 - **TFVC support: migrate from TFS to GitLab.** `source.kind: tfvc` reads a Team
@@ -145,7 +151,7 @@ log streaming, both backed by the same state store.
 inheritance of shared settings and optional parallel execution.
 
 **Packaging** — PyInstaller bundle plus an Inno Setup installer for Windows Server
-2019 and later, which detects missing Git and Subversion and says where to get them.
+2016 and later, which detects missing Git and Subversion and says where to get them.
 
 ### Security
 

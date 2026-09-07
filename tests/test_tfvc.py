@@ -489,3 +489,107 @@ def test_migrated_repositories_pin_line_endings(tmp_path, tfs):
 
     assert git_wrapper.config_get("core.autocrlf") == "false"
     assert git_wrapper.config_get("core.safecrlf") == "false"
+
+
+@pytest.mark.skipif(not git_http_backend_available(), reason="git-http-backend required")
+def test_tfvc_sync_picks_up_new_changesets(tmp_path, tfs):
+    """Incremental sync must work without touching Subversion.
+
+    The sync path asked the SVN client for the head revision regardless of source,
+    so every TFVC sync failed with `svn: E170013: Unable to connect`. Cutover failed
+    with it too, since cutover runs a final sync.
+    """
+    from fake_gitlab import FakeGitLab
+    from svn2gitlab.config import load_config
+    from svn2gitlab.pipeline import build_pipelines
+    from svn2gitlab.state import StateStore
+    from svn2gitlab.sync.incremental import SyncRunner
+
+    with FakeGitLab(tmp_path / "gitlab", GIT) as gitlab:
+        authors = tmp_path / "authors.txt"
+        authors.write_text(
+            "CONTOSO\\alice = Alice <alice@contoso.com>\n"
+            "CONTOSO\\bob = Bob <bob@contoso.com>\n"
+            "CONTOSO\\carol = Carol <carol@contoso.com>\n", encoding="utf-8")
+        config_path = tmp_path / "sync.yaml"
+        config_path.write_text(f"""
+version: 1
+name: syncdemo
+workdir: {(tmp_path / 'work').as_posix()}
+source:
+  kind: tfvc
+  url: {tfs.url}
+  collection: DefaultCollection
+  project: DemoProject
+  token: {tfs.token}
+authors: {{file: {authors.as_posix()}, default_domain: contoso.com}}
+convert: {{default_branch: main, generate_gitignore: false}}
+target:
+  gitlab_url: {gitlab.url}
+  token: {gitlab.token}
+  namespace: acme
+  project: demo
+verify: {{mode: "off"}}
+""", encoding="utf-8")
+
+        config = load_config(config_path)
+        state = StateStore(config.workdir_path() / "state.db")
+        pipeline = build_pipelines(config, state, dry_run=False)[0]
+        assert pipeline.run().ok
+        before = gitlab.refs("acme/demo")["refs/heads/main"]
+
+        # A brand-new author commits after the migration - the case that used to
+        # abort every subsequent sync until someone ran `authors --write` by hand.
+        tfs.history.commit("CONTOSO\\dave", "Change from a new joiner", [
+            tfs.history.edit("$/DemoProject/Main/src/program.cs", b"class P { /* v2 */ }\n"),
+        ])
+
+        result = SyncRunner(pipeline, state).run_once(push=True)
+        assert result.ok, result.error
+        assert result.new_revisions >= 1
+        assert gitlab.refs("acme/demo")["refs/heads/main"] != before
+
+
+@pytest.mark.skipif(not git_http_backend_available(), reason="git-http-backend required")
+def test_tfvc_cutover_reports_that_tfs_must_be_frozen_in_tfs(tmp_path, tfs):
+    """There is no repository hook to install for TFVC, and we must say so."""
+    from fake_gitlab import FakeGitLab
+    from svn2gitlab.config import load_config
+    from svn2gitlab.pipeline import build_pipelines
+    from svn2gitlab.state import StateStore
+    from svn2gitlab.sync.incremental import SyncRunner
+
+    with FakeGitLab(tmp_path / "gitlab", GIT) as gitlab:
+        authors = tmp_path / "authors.txt"
+        authors.write_text("CONTOSO\\alice = Alice <a@c.com>\n", encoding="utf-8")
+        config_path = tmp_path / "cut.yaml"
+        config_path.write_text(f"""
+version: 1
+name: cutdemo
+workdir: {(tmp_path / 'work').as_posix()}
+source:
+  kind: tfvc
+  url: {tfs.url}
+  collection: DefaultCollection
+  project: DemoProject
+  token: {tfs.token}
+authors: {{file: {authors.as_posix()}, default_domain: contoso.com}}
+convert: {{default_branch: main, generate_gitignore: false}}
+target:
+  gitlab_url: {gitlab.url}
+  token: {gitlab.token}
+  namespace: acme
+  project: cut
+verify: {{mode: "off"}}
+""", encoding="utf-8")
+
+        config = load_config(config_path)
+        state = StateStore(config.workdir_path() / "state.db")
+        pipeline = build_pipelines(config, state, dry_run=False)[0]
+        assert pipeline.run().ok
+
+        outcome = SyncRunner(pipeline, state).cutover(lock_svn=True, verify=False)
+        assert outcome.get("status") != "failed", outcome.get("error")
+        lock = outcome.get("lock") or {}
+        assert lock.get("locked") is False
+        assert any("Check in" in w for w in lock.get("warnings", [])), lock

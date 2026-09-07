@@ -751,6 +751,9 @@ class MigrationPipeline:
     # ------------------------------------------------------- public helpers --
 
     def svn_head_revision(self) -> int:
+        """Newest source version: an SVN revision, or a TFVC changeset id."""
+        if self.is_tfvc:
+            return self.tfvc.changeset_count_hint(self.repo.source.tfvc_project_root())
         return self.svn.head_revision(self.source_url())
 
     def refresh_authors(self, since_revision: int = 0) -> List[str]:
@@ -760,13 +763,18 @@ class MigrationPipeline:
         Conversion refuses a revision whose author is not in the map, and the
         operator has to notice, run `authors --write`, and re-run by hand.
         """
-        url = self.source_url()
         head = self.svn_head_revision()
         start = max(1, since_revision + 1)
         if start > head:
             return []
 
-        seen = {entry.author for entry in self.svn.iter_log(url, start=start, end=head)}
+        if self.is_tfvc:
+            seen = {c.author.key for c in self.tfvc.iter_changesets(
+                item_path=self.repo.source.tfvc_project_root(),
+                from_id=start, to_id=head)}
+        else:
+            seen = {entry.author for entry in
+                    self.svn.iter_log(self.source_url(), start=start, end=head)}
         existing = AuthorMap.load(self.repo.authors_file)
         new_authors = sorted(a for a in seen if a and a not in existing)
         if not new_authors:
@@ -776,7 +784,7 @@ class MigrationPipeline:
                  ", ".join(new_authors[:10]))
         if self.repo.authors.policy == AuthorPolicy.STRICT:
             raise ConfigError(
-                f"new SVN author(s) since the last sync are not mapped: "
+                f"new author(s) since the last sync are not mapped: "
                 f"{', '.join(new_authors)}",
                 f"Add them to {self.repo.authors_file}, then run the sync again. "
                 "Set `authors.policy: generate` to have addresses synthesised instead.",

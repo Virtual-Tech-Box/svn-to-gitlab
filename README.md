@@ -40,6 +40,8 @@ nine, not hour zero.
 
 ### Windows
 
+Supported: **Windows Server 2016 and later**, x64.
+
 Download `svn2gitlab-setup-<version>.exe` from
 [Releases](https://github.com/Virtual-Tech-Box/svn-to-gitlab/releases) and run it. It
 installs to `Program Files`, adds the tool to `PATH`, creates a working area under

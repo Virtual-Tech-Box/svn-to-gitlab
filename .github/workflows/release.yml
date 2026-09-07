@@ -16,7 +16,12 @@ permissions:
 jobs:
   windows-installer:
     name: Windows installer
-    runs-on: windows-latest
+    # Pinned to the oldest Windows runner GitHub still offers. The binary must start
+    # on Windows Server 2016, and a PE image built on a newer OS can stamp a newer
+    # loader floor into itself. windows-2019 was retired, so 2022 is the floor
+    # available to us - `check_os_floor.py` then proves the result is actually
+    # loadable rather than assuming it.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +43,9 @@ jobs:
 
       - name: Smoke-test the frozen binary
         run: .\dist\svn2gitlab\svn2gitlab.exe version
+
+      - name: Check the binary will load on Windows Server 2016
+        run: python installer/check_os_floor.py dist/svn2gitlab/svn2gitlab.exe
 
       - name: Check the pinned prerequisite URL still resolves
         shell: pwsh

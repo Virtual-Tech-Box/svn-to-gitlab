@@ -127,7 +127,8 @@ jobs:
   # CI and still fail at runtime on a missing hidden import, so it is smoke-tested.
   build-frozen:
     name: Frozen build smoke test
-    runs-on: windows-latest
+    # Matches the release build: the artifact has to start on Windows Server 2016.
+    runs-on: windows-2022
     needs: [test-linux]
     steps:
       - uses: actions/checkout@v4
@@ -141,6 +142,9 @@ jobs:
         run: |
           .\dist\svn2gitlab\svn2gitlab.exe version
           .\dist\svn2gitlab\svn2gitlab.exe --help
+
+      - name: Check the binary will load on Windows Server 2016
+        run: python installer/check_os_floor.py dist/svn2gitlab/svn2gitlab.exe
       - uses: actions/upload-artifact@v4
         with:
           name: svn2gitlab-windows-unsigned

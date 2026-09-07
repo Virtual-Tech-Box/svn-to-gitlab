@@ -7,12 +7,15 @@
 ; Build (on Windows, after `pyinstaller installer/svn2gitlab.spec`):
 ;   iscc installer\svn2gitlab.iss
 ;
-; Target: Windows Server 2019 and later, x64.
-; Server 2019 is the oldest supported target, so the minimum is set there.
+; Target: Windows Server 2016 and later, x64.
+;
+; Server 2016 is build 10.0.14393 (the same kernel as Windows 10 1607). The gate
+; used to sit at 17763, which is Server 2019 - so setup refused to run on 2016
+; even though nothing in the tool needs anything newer.
 
 #define AppName        "svn2gitlab"
 #define AppURL         "https://github.com/Virtual-Tech-Box/svn-to-gitlab"
-#define AppVersion     "1.1.0-rc1"
+#define AppVersion     "1.1.0-rc2"
 #define AppPublisher   "Virtual Tech Box"
 #define AppExeName     "svn2gitlab.exe"
 #define SourceDir      "..\dist\svn2gitlab"
@@ -37,7 +40,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0.17763
+; 10.0.14393 = Windows Server 2016 / Windows 10 1607.
+MinVersion=10.0.14393
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
 ChangesEnvironment=yes
