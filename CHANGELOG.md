@@ -9,6 +9,42 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **TFVC branch content came from the wrong place.** A folder-level `branch` change
+  was treated as a whole-tree copy from the *converted* source branch's head, and the
+  per-file `branch` records TFVC emits alongside it were discarded. TFVC branches from
+  any version, not only the source's tip, so that head is frequently the wrong tree —
+  and a branch cut from an already-stale branch inherits the error and adds its own.
+  On the first production migration this left roughly 4,800 files stale across ten
+  branches, untouched on the mainline and worst on branches cut from branches. The
+  per-file records carry each file's own item version and are now the authority.
+  Deduplication on the content hash happens before any request, so a branch copy still
+  costs metadata rather than bandwidth.
+
+- **The conversion and the analysis could disagree about which branch is the
+  mainline.** `analyze` honoured the operator's `source.branch_roots` ordering while
+  the conversion fell back to choosing alphabetically, so the report named one branch
+  as trunk while the export published a different one as `main`. Verification cannot
+  catch this — it compares `main` against whatever the conversion decided `main` meant,
+  so a side branch published as the default branch verifies perfectly. The two layouts
+  must now agree or the run stops.
+
+- **Verification under-reported its own findings.** `difference_count` counted the
+  list *after* `verify.max_reported_diffs` truncated it, so a branch with 1,245
+  differences reported 200. The count is never capped now; only the listing is, and
+  `differences_omitted` records how much was withheld.
+
+- Verification's truncation warning and every skip reason were written to an attribute
+  `BranchVerification` does not declare, and were silently discarded.
+
+- The migration manifest lost all verification detail when verification *failed* — the
+  one case where it matters — because the stage raises before returning a result. The
+  error text told the operator to go and read a report that had been emptied.
+
+- Files with no extension were bucketed in the manifest under an empty JSON key, which
+  Windows PowerShell's `ConvertFrom-Json` refuses to load, making the report
+  unreadable on the platform the tool is built for. They now bucket under
+  `(no extension)`.
+
 - **The Windows installer now bundles Git instead of downloading it.** Fetching it
   on demand failed at a client site, and always would have: migration hosts sit
   behind VPNs and proxies that block public DNS, which is precisely the environment
