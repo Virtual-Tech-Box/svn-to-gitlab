@@ -15,7 +15,13 @@
 
 #define AppName        "svn2gitlab"
 #define AppURL         "https://github.com/Virtual-Tech-Box/svn-to-gitlab"
-#define AppVersion     "1.1.0-rc3"
+; Supplied by the release build as `ISCC /DAppVersion=1.2.3`. It used to be written
+; here by hand, which is a second copy of the version number and it drifted: rc4 was
+; published as `svn2gitlab-setup-1.1.0-rc3.exe`, correct inside and wrong on the tin.
+; The fallback below is only for local builds.
+#ifndef AppVersion
+  #define AppVersion   "0.0.0-dev"
+#endif
 #define AppPublisher   "Virtual Tech Box"
 #define AppExeName     "svn2gitlab.exe"
 #define SourceDir      "..\dist\svn2gitlab"

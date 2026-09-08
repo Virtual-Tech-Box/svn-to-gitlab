@@ -160,8 +160,23 @@ jobs:
             $iscc = $found
           }
           Write-Host "using $iscc"
-          & $iscc installer\svn2gitlab.iss
+          # The version comes from the tag, never from a copy kept in the .iss.
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { throw "could not derive a version from the tag" }
+          Write-Host "building installer for version $version"
+          & $iscc "/DAppVersion=$version" installer\svn2gitlab.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+
+          # A mislabelled installer is worse than a missing one: it gets installed by
+          # someone who then reports a bug against the wrong build. rc4 shipped as
+          # `svn2gitlab-setup-1.1.0-rc3.exe` exactly once.
+          $expected = "svn2gitlab-setup-$version.exe"
+          if (-not (Test-Path "dist\$expected")) {
+            $actual = (Get-ChildItem dist\svn2gitlab-setup-*.exe |
+                       Select-Object -First 1 -ExpandProperty Name)
+            throw "expected dist\$expected but the build produced '$actual'"
+          }
+          Write-Host "installer name matches the tag: $expected"
 
       - name: Package the portable build
         shell: pwsh
