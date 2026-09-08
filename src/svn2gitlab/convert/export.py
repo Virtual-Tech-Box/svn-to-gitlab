@@ -29,7 +29,7 @@ from ..svn.analyze import sanitize_ref_name
 from ..tools import ToolSet
 from . import fastfilter, lfs as lfs_mod
 from .git import Git
-from .mirrorfmt import SVN_PREFIX
+from .mirrorfmt import SVN_FORMAT, SVN_PREFIX
 
 log = get_logger("export")
 
@@ -108,6 +108,10 @@ class Exporter:
         # gone. `None` means "we were not told", and nothing is filtered.
         self.live_branches = set(live_branches) if live_branches is not None else None
         self.live_tags = set(live_tags) if live_tags is not None else None
+        # Which source produced the mirror. Both use the same ref/trailer shape, so
+        # everything below is written against the format rather than against
+        # Subversion specifically.
+        self.fmt = getattr(mirror, "fmt", SVN_FORMAT)
 
     @property
     def rewrites_history(self) -> bool:
@@ -205,7 +209,7 @@ class Exporter:
         self.git.set_remote("mirror", mirror_path)
         self.git.run(
             ["fetch", "--no-tags", "--prune", "--force", "mirror",
-             f"refs/remotes/{SVN_PREFIX}*:{SRC_NAMESPACE}/*"],
+             f"{self.fmt.ref_root}*:{SRC_NAMESPACE}/*"],
             timeout=None,
             remedy="Could not read refs from the git-svn mirror. Re-run with "
                    "`--restart-from convert` to rebuild it.",
@@ -231,7 +235,7 @@ class Exporter:
     def _map_branches(self, result: ExportResult) -> None:
         src = self._src_refs()
         tag_sources = set(self._tag_source_names().values())
-        trunk_short = self.mirror.trunk_ref[len(f"refs/remotes/{SVN_PREFIX}"):]
+        trunk_short = self.mirror.trunk_ref[len(self.fmt.ref_root):]
 
         trunk_sha = src.get(trunk_short)
         if not trunk_sha:
@@ -408,7 +412,8 @@ class Exporter:
 
     def _commit_gitignore(self) -> bool:
         """Translate svn:ignore properties into a committed .gitignore on the default branch."""
-        content = self.mirror.svn_ignore_content()
+        content = self.mirror.svn_ignore_content() \
+            if hasattr(self.mirror, "svn_ignore_content") else ""
         if not content.strip():
             log.info("no svn:ignore properties found; skipping .gitignore")
             return False

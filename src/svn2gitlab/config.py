@@ -82,6 +82,11 @@ class LayoutMode(str, Enum):
     MULTI_PROJECT = "multi"  # <project>/trunk, <project>/branches, ... per subdirectory
 
 
+class SourceKind(str, Enum):
+    SVN = "svn"        # Subversion
+    TFVC = "tfvc"      # Team Foundation Version Control (TFS / Azure DevOps)
+
+
 class FastPath(str, Enum):
     AUTO = "auto"        # pick the best available for this source
     HOTCOPY = "hotcopy"  # svnadmin hotcopy from a local repository path
@@ -158,10 +163,24 @@ class SourceConfig(_Base):
     runs on the SVN server itself.
     """
 
+    # Which kind of server this is. Everything after the conversion stage is shared,
+    # so this only selects how history is read.
+    kind: SourceKind = SourceKind.SVN
+
     url: Optional[str] = None
     local_path: Optional[str] = None
     # Subdirectory inside the repository to migrate (for one-repo-many-projects setups).
     subpath: Optional[str] = None
+
+    # -- TFVC only ------------------------------------------------------------
+    # Collection URL is `url`; these narrow it to one team project and its branches.
+    collection: Optional[str] = None        # e.g. DefaultCollection
+    project: Optional[str] = None           # team project name
+    token: Optional[str] = None             # personal access token (TFS 2015u3+)
+    project_root: Optional[str] = None      # "$/MyProject"; derived from project if unset
+    branch_roots: List[str] = Field(default_factory=list)   # explicit "$/P/Main" paths
+    verify_tls: bool = True
+    ca_bundle: Optional[str] = None
 
     username: Optional[str] = None
     password: Optional[str] = None
@@ -177,6 +196,11 @@ class SourceConfig(_Base):
     @classmethod
     def _resolve_password(cls, v: Optional[str]) -> Optional[str]:
         return resolve_secret(v, "source.password")
+
+    @field_validator("token")
+    @classmethod
+    def _resolve_token(cls, v: Optional[str]) -> Optional[str]:
+        return resolve_secret(v, "source.token")
 
     @field_validator("subpath")
     @classmethod
@@ -195,7 +219,8 @@ class SourceConfig(_Base):
         parsed = urlparse(v)
         if parsed.scheme not in ("http", "https", "svn", "svn+ssh", "file"):
             raise ValueError(
-                f"unsupported SVN URL scheme {parsed.scheme!r}; expected http, https, svn, svn+ssh or file"
+                f"unsupported source URL scheme {parsed.scheme!r}; expected http, "
+                "https, svn, svn+ssh or file"
             )
         if parsed.username or parsed.password:
             # Credentials belong in the dedicated fields, not the URL we log everywhere.
@@ -207,6 +232,21 @@ class SourceConfig(_Base):
 
     @model_validator(mode="after")
     def _check_source(self) -> "SourceConfig":
+        if self.kind == SourceKind.TFVC:
+            if not self.url:
+                raise ValueError(
+                    "source.kind=tfvc requires `url` (the collection URL, e.g. "
+                    "https://tfs.example.com/tfs/DefaultCollection)")
+            if not self.project and not self.project_root:
+                raise ValueError(
+                    "source.kind=tfvc requires `project` (the team project name) "
+                    "or an explicit `project_root` such as $/MyProject")
+            if not self.token and not self.username:
+                raise ValueError(
+                    "source.kind=tfvc requires `token` (a personal access token with "
+                    "the Code:read scope) or `username`/`password` for a Windows-"
+                    "authenticated server")
+            return self
         if not self.url and not self.local_path:
             raise ValueError("source requires either `url` or `local_path`")
         if self.revision_start < 0:
@@ -214,6 +254,12 @@ class SourceConfig(_Base):
         if self.revision_end is not None and self.revision_end < self.revision_start:
             raise ValueError("source.revision_end must be >= revision_start")
         return self
+
+    def tfvc_project_root(self) -> str:
+        """`$/Project`, from an explicit setting or derived from the project name."""
+        if self.project_root:
+            return self.project_root.rstrip("/")
+        return f"$/{(self.project or '').strip('/')}"
 
     def effective_url(self) -> str:
         """A URL to convert from, preferring the local repository when present."""

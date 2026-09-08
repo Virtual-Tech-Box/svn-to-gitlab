@@ -20,6 +20,43 @@ The shape of a migration that goes well:
 
 ---
 
+## If the source is TFS (TFVC)
+
+The phases below apply unchanged; these are the differences.
+
+**Where to run it.** Anywhere that can reach the TFS application tier. History is
+read over the REST API, so unlike Subversion there is no advantage to running on the
+server, and no `tf.exe` or Visual Studio is needed.
+
+**Access.** A personal access token with the **Code (read)** scope (TFS 2015 Update 3
+and later). For an older Windows-authenticated server use `username: DOMAIN\user`
+plus `password`, and `pip install requests-ntlm`. The account needs read on the whole
+team project — a partially readable project cannot be migrated faithfully.
+
+**Check the branch detection first.** This is the one thing most likely to be wrong.
+`analyze` reports whether branch roots came from the project's TFVC *branch
+definitions* or were *inferred from path conventions*. Inferred means the project
+branched by copying folders without converting them, and a wrong guess silently
+merges separate lines of development. If the list looks wrong, set
+`source.branch_roots` explicitly and re-run `analyze`.
+
+**Expect these in the report**, all of which are stated rather than silent:
+
+- no tags (TFVC has none; labels are not migrated)
+- merges become ordinary commits — content correct, branch topology simplified
+- no ignore translation
+
+**Cutover differs.** There is no read-only lock to apply. Set
+`sync.lock_svn_on_cutover: false` and instead deny the **Check in** permission on the
+team project in TFS at the cutover window, then run `svn2gitlab sync --once` for the
+final delta and `verify`.
+
+**Speed.** Item content is fetched over HTTP, so a large history takes longer than
+the Subversion local fast path. Conversion is resumable and blobs are deduplicated by
+content hash, so a re-run costs only what is new.
+
+---
+
 ## Phase 0 — Prerequisites
 
 **Where to run it.** On the Subversion server if you possibly can. It removes the

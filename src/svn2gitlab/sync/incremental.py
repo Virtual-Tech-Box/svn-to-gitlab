@@ -253,7 +253,19 @@ class SyncRunner:
         outcome: Dict[str, object] = {"repository": self.repo.name, "dry_run": dry_run}
 
         lock_result = None
-        if lock_svn:
+        is_tfvc = getattr(self.pipeline, "is_tfvc", False)
+        if lock_svn and is_tfvc:
+            # TFVC has no repository-level hook to install. Freezing a team project
+            # is a permission change in TFS, which this tool deliberately does not
+            # make on the customer's behalf.
+            outcome["lock"] = {
+                "locked": False,
+                "warnings": ["TFVC cannot be locked from here. Before announcing the "
+                             "cutover, deny the 'Check in' permission on the team "
+                             "project in TFS, then re-run the final sync."],
+            }
+            log.warning("cutover without a source lock - TFVC is frozen in TFS, not here")
+        elif lock_svn:
             step(0.05, "making the Subversion repository read-only")
             local_path = self.repo.source.local_path
             if not local_path:

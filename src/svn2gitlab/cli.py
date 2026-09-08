@@ -111,14 +111,31 @@ def _fail(exc: Exception, verbose: bool = False) -> None:
 def doctor(
     tool_dir: List[str] = typer.Option([], "--tool-dir", help="Extra directory to search for executables."),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable output."),
+    source: Optional[str] = typer.Option(
+        None, "--source", "-s",
+        help="Check readiness for one source only: svn or tfvc. "
+             "Without it, both are reported and the command succeeds if either can run."),
 ) -> None:
     """Check that every external tool this migration needs is present and usable."""
     setup_logging(None, console=not json_output)
     tools = detect_tools(tool_dir, refresh=True)
 
+    wanted = (source or "").strip().lower() or None
+    if wanted and wanted not in ("svn", "tfvc", "tfs"):
+        err_console.print(f"[red]unknown source {source!r}; expected svn or tfvc[/red]")
+        raise typer.Exit(code=2)
+    if wanted == "tfs":
+        wanted = "tfvc"
+
+    readiness = _source_readiness(tools)
+
     if json_output:
-        console.print_json(json.dumps(tools.to_dict()))
-        raise typer.Exit(code=0 if _core_ready(tools) else 1)
+        console.print_json(json.dumps({
+            "tools": tools.to_dict(),
+            "sources": {k: {"ready": v[0], "missing": v[1]} for k, v in readiness.items()},
+        }))
+        ok = readiness[wanted][0] if wanted else any(v[0] for v in readiness.values())
+        raise typer.Exit(code=0 if ok else 1)
 
     table = Table(title="External tools", show_lines=False)
     table.add_column("Tool")
@@ -141,9 +158,27 @@ def doctor(
         table.add_row(info.name, status, purpose, detail or "", info.path or "")
     console.print(table)
 
-    if _core_ready(tools):
-        console.print("\n[green]This machine can run a migration.[/green]")
+    # What this machine can migrate *from*. A TFVC migration reads history over
+    # HTTP and needs only git; reporting Subversion's tools as mandatory would tell
+    # a perfectly capable TFS machine that it is broken.
+    console.print()
+    summary = Table(title="Migrations this machine can run", show_lines=False)
+    summary.add_column("Source")
+    summary.add_column("Status")
+    summary.add_column("Needs")
+    for key, label, needs in (
+        ("svn", "Subversion", "git, svn, svnadmin"),
+        ("tfvc", "TFS / Azure DevOps (TFVC)", "git only (history is read over HTTPS)"),
+    ):
+        ready, missing = readiness[key]
+        status = "[green]ready[/green]" if ready else \
+            "[red]missing: " + ", ".join(missing) + "[/red]"
+        summary.add_row(label, status, needs)
+    console.print(summary)
 
+    target_ready = readiness[wanted][0] if wanted else any(v[0] for v in readiness.values())
+
+    if target_ready:
         notes = []
         if not tools.svnadmin.available:
             notes.append("svnadmin is not installed, so the native engine, the local fast "
@@ -155,11 +190,13 @@ def doctor(
             console.print(f"[dim]- {note}[/dim]")
         raise typer.Exit(code=0)
 
-    console.print("\n[red]Required tools are missing.[/red]")
+    blocked = readiness[wanted] if wanted else ("", sorted(
+        {m for v in readiness.values() for m in v[1]}))
+    console.print(f"\n[red]Required tools are missing for "
+                  f"{'a ' + wanted.upper() + ' migration' if wanted else 'any migration'}."
+                  f"[/red]")
     from .tools import _install_hint
-    missing = [i.name for i in tools.all()
-               if not i.available and _tool_role(i.name, tools)[1]]
-    console.print(_install_hint(missing))
+    console.print(_install_hint(blocked[1]))
     raise typer.Exit(code=1)
 
 
@@ -171,9 +208,9 @@ def _tool_role(name: str, tools: ToolSet) -> tuple:
     signal from a command whose entire job is to tell you where you stand.
     """
     roles = {
-        "git": ("everything", True),
-        "svn": ("everything", True),
-        "svnadmin": ("conversion, local fast path, cutover lock", True),
+        "git": ("everything, both sources", True),
+        "svn": ("Subversion migrations", True),
+        "svnadmin": ("Subversion conversion, fast path, cutover lock", True),
         "git-lfs": ("only with convert.lfs.enabled", False),
         "svnrdump": ("mirroring a remote repository locally", False),
         "svnsync": ("mirroring a remote repository locally", False),
@@ -182,10 +219,27 @@ def _tool_role(name: str, tools: ToolSet) -> tuple:
     return roles.get(name, ("", False))
 
 
+def _source_readiness(tools: ToolSet) -> dict:
+    """Which source kinds this machine can migrate from, and what each is missing.
+
+    They genuinely differ. Subversion is converted from a local `svnadmin dump`, so
+    it needs the Subversion tooling. TFVC is read over HTTPS and needs nothing but
+    git — so a TFS migration host with no Subversion installed is entirely healthy,
+    and must not be told otherwise.
+    """
+    svn_missing = [name for name, info in
+                   (("git", tools.git), ("svn", tools.svn), ("svnadmin", tools.svnadmin))
+                   if not info.available]
+    tfvc_missing = [] if tools.git.available else ["git"]
+    return {
+        "svn": (not svn_missing, svn_missing),
+        "tfvc": (not tfvc_missing, tfvc_missing),
+    }
+
+
 def _core_ready(tools: ToolSet) -> bool:
-    """Everything a migration needs: git, an svn client, and svnadmin for the dump."""
-    return (tools.git.available and tools.svn.available
-            and tools.svnadmin.available)
+    """True when at least one kind of migration can run here."""
+    return any(ready for ready, _missing in _source_readiness(tools).values())
 
 
 # --------------------------------------------------------------------------- #

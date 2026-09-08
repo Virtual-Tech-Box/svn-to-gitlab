@@ -7,6 +7,105 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **A TFVC rename with no edit deleted the file.** `rename` carries no content flag,
+  so nothing was written at the new path while the old one was removed — the file
+  vanished. Only `rename, edit` was ever tested, where the edit supplied the bytes and
+  masked it. A rename now moves the existing object, resolved from the parent tree, so
+  it costs no download.
+
+- **A folder-level delete removed nothing, and a folder-level rename moved nothing.**
+  Every folder change was skipped on the grounds that folders carry no content, but
+  TFVC can delete or rename a folder with no per-file records at all, and both move
+  the entire subtree. Deleted folders stayed in the migrated branch indefinitely.
+
+- **A TFVC merge could resurrect a deleted file.** `merge` was treated as a
+  content-bearing change flag, but in TFVC it is a *relationship* flag: the action
+  travels beside it as `merge, edit`, `merge, branch` or `merge, delete`. A bare
+  `merge` records that a merge happened without changing the item — including when
+  what was merged is a deletion, where TFS reports a bare `merge` on a path that is
+  already, and stays, deleted. The converter wrote the file back, and did so
+  silently, because the bytes came from its content-hash cache and no request was
+  made that could have returned 404. On the first production migration this restored
+  730 files that had been deleted, across two branches. `merge` alone no longer
+  implies content; `merge, edit` and the rest are unaffected.
+
+  The fake TFS shared the same wrong assumption — any non-delete change counted as a
+  resurrection — so it would have made the defect look correct. It now models what
+  the server actually does.
+
+- **TFVC branch content came from the wrong place.** A folder-level `branch` change
+  was treated as a whole-tree copy from the *converted* source branch's head, and the
+  per-file `branch` records TFVC emits alongside it were discarded. TFVC branches from
+  any version, not only the source's tip, so that head is frequently the wrong tree —
+  and a branch cut from an already-stale branch inherits the error and adds its own.
+  On the first production migration this left roughly 4,800 files stale across ten
+  branches, untouched on the mainline and worst on branches cut from branches. The
+  per-file records carry each file's own item version and are now the authority.
+  Deduplication on the content hash happens before any request, so a branch copy still
+  costs metadata rather than bandwidth.
+
+- **The conversion and the analysis could disagree about which branch is the
+  mainline.** `analyze` honoured the operator's `source.branch_roots` ordering while
+  the conversion fell back to choosing alphabetically, so the report named one branch
+  as trunk while the export published a different one as `main`. Verification cannot
+  catch this — it compares `main` against whatever the conversion decided `main` meant,
+  so a side branch published as the default branch verifies perfectly. The two layouts
+  must now agree or the run stops.
+
+- **Verification under-reported its own findings.** `difference_count` counted the
+  list *after* `verify.max_reported_diffs` truncated it, so a branch with 1,245
+  differences reported 200. The count is never capped now; only the listing is, and
+  `differences_omitted` records how much was withheld.
+
+- Verification's truncation warning and every skip reason were written to an attribute
+  `BranchVerification` does not declare, and were silently discarded.
+
+- The migration manifest lost all verification detail when verification *failed* — the
+  one case where it matters — because the stage raises before returning a result. The
+  error text told the operator to go and read a report that had been emptied.
+
+- Files with no extension were bucketed in the manifest under an empty JSON key, which
+  Windows PowerShell's `ConvertFrom-Json` refuses to load, making the report
+  unreadable on the platform the tool is built for. They now bucket under
+  `(no extension)`.
+
+- **The Windows installer now bundles Git instead of downloading it.** Fetching it
+  on demand failed at a client site, and always would have: migration hosts sit
+  behind VPNs and proxies that block public DNS, which is precisely the environment
+  this tool is built for. Git for Windows (MinGit) is downloaded when the release is
+  built and shipped inside the package, so installation needs no network at all. The
+  release build proves it by stripping every Git directory from PATH and confirming
+  the tool still resolves one from inside its own package.
+
+- The Windows installer refused to run on **Windows Server 2016**. Its minimum OS
+  was set to build 10.0.17763 (Server 2019) when nothing in the tool needs anything
+  newer; the gate is now 10.0.14393, which is Server 2016 / Windows 10 1607.
+
+### Added
+
+- **TFVC support: migrate from TFS to GitLab.** `source.kind: tfvc` reads a Team
+  Foundation Version Control history over the REST API (TFS 2015/2017/2018, Azure
+  DevOps Server and Services) and converts changesets into Git commits with the same
+  fast-import writer the Subversion engine uses. Everything downstream — export, LFS,
+  GitLab push, byte-for-byte verification and incremental sync — is shared, not
+  duplicated.
+
+  REST is used deliberately rather than `tf.exe` or the .NET client libraries, so
+  the migrator stays cross-platform and free of Windows-only dependencies.
+
+  Three documented API behaviours are handled explicitly because each silently
+  corrupts a migration otherwise: comments truncate to 80 characters by default,
+  `changeType` is a comma-separated flags enum where `rename, edit` means both, and
+  `hashValue` is a base64 MD5. Branch creation is resolved with fast-import's `ls`
+  rather than replaying the per-file `branch` changes TFVC emits, so branching a
+  large tree costs one operation instead of re-downloading it.
+
+  Not migrated, and reported in the analysis: TFVC labels (no Git equivalent), merge
+  topology (content is correct, branch shape is simplified), and ignore rules. The
+  cutover lock remains Subversion-only; for TFVC deny "Check in" in TFS.
+
 ## [1.0.1] - 2026-08-11
 
 Fixes a release-blocking problem on Windows. Git for Windows removed `git svn` in
@@ -122,7 +221,7 @@ log streaming, both backed by the same state store.
 inheritance of shared settings and optional parallel execution.
 
 **Packaging** — PyInstaller bundle plus an Inno Setup installer for Windows Server
-2019 and later, which detects missing Git and Subversion and says where to get them.
+2016 and later, which detects missing Git and Subversion and says where to get them.
 
 ### Security
 

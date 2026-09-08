@@ -19,9 +19,15 @@ limitations under the License.
 THIRD-PARTY SOFTWARE
 --------------------------------------------------------------------------------
 
-This project does not bundle Git or Subversion. It invokes whatever copies are
-installed on the host machine as separate processes. Those tools are distributed
-under their own licences:
+The Windows installer **bundles Git for Windows (MinGit)**, unmodified, so that a
+migration host with no internet access can still run. Git is free software under
+the GNU General Public License version 2. Its licence ships as `docs\GIT-LICENSE.txt`
+inside the installed package, and `docs\GIT-SOURCE-OFFER.txt` records the exact
+upstream release the bundled binaries were taken from, together with their SHA-256,
+so the corresponding source can be obtained.
+
+Subversion is not bundled; it is invoked from whatever copy is installed on the
+host. Both tools are distributed under their own licences:
 
   * Git and git-svn        GNU General Public License, version 2
                            https://git-scm.com/about/free-and-open-source
