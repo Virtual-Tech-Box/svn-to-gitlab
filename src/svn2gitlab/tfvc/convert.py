@@ -57,6 +57,9 @@ class TfvcLayout:
     branch_roots: List[str] = field(default_factory=list)   # full server paths
     main_root: str = ""
     detected_from: str = ""
+    # True when no branch looked like a mainline and one was picked arbitrarily.
+    # Publishing an arbitrary branch as `main` is not something to do quietly.
+    main_is_a_guess: bool = False
 
     # -- DetectedLayout-compatible surface ------------------------------------
     # The exporter reads `layout.tags`/`.trunk`/`.branches` without caring which
@@ -77,7 +80,8 @@ class TfvcLayout:
 
     def to_dict(self) -> dict:
         return {"project_root": self.project_root, "main_root": self.main_root,
-                "branch_roots": self.branch_roots, "detected_from": self.detected_from}
+                "branch_roots": self.branch_roots, "detected_from": self.detected_from,
+                "main_is_a_guess": self.main_is_a_guess}
 
 
 @dataclass
@@ -111,7 +115,8 @@ class TfvcResult:
 
 
 def detect_layout(project_root: str, branch_paths: Sequence[str],
-                  sample_paths: Sequence[str] = ()) -> TfvcLayout:
+                  sample_paths: Sequence[str] = (),
+                  explicitly_configured: bool = False) -> TfvcLayout:
     """Work out the branch roots for a team project.
 
     TFVC's branch API only knows about folders explicitly *converted to branches*.
@@ -122,9 +127,14 @@ def detect_layout(project_root: str, branch_paths: Sequence[str],
     layout = TfvcLayout(project_root=root)
 
     known = [p.rstrip("/") for p in branch_paths if p and p.rstrip("/") != root]
+    explicit_main = ""
     if known:
+        # An explicitly configured list is an instruction, not a discovery: the
+        # first entry is taken as the mainline so the operator can decide.
+        explicit_main = known[0] if explicitly_configured else ""
         layout.branch_roots = sorted(set(known))
-        layout.detected_from = "server branch definitions"
+        layout.detected_from = ("configured branch roots" if explicitly_configured
+                                else "server branch definitions")
     else:
         # Fall back to the folders directly under the project root.
         candidates = set()
@@ -143,12 +153,20 @@ def detect_layout(project_root: str, branch_paths: Sequence[str],
         layout.branch_roots = sorted(candidates)
         layout.detected_from = "path conventions (no server branch definitions found)"
 
+    if explicit_main:
+        layout.main_root = explicit_main
+        return layout
+
     for candidate in layout.branch_roots:
         if candidate.rsplit("/", 1)[-1].lower() in MAIN_NAMES:
             layout.main_root = candidate
-            break
-    if not layout.main_root and layout.branch_roots:
+            return layout
+
+    if layout.branch_roots:
+        # Nothing is called Main/Trunk/Master. Pick one so the run can proceed, but
+        # record that it was a guess so the analysis can say so loudly.
         layout.main_root = layout.branch_roots[0]
+        layout.main_is_a_guess = True
     return layout
 
 

@@ -38,12 +38,20 @@ def analyse(
     api_version = client.probe()
     analysis.repository_uuid = f"tfvc-api-{api_version}"
 
+    # -- does the project even exist? -----------------------------------------
+    # Checked up front and reported with the alternatives, because the collection
+    # name and the team project name are frequently different and the resulting
+    # 404 midway through a history walk explains nothing.
+    if on_progress:
+        on_progress(0.10, f"checking {project_root} exists")
+    _assert_project_root(client, project_root)
+
     # -- layout ---------------------------------------------------------------
     if on_progress:
         on_progress(0.15, "discovering branches")
-    declared = [b.get("path") for b in client.branches() if b.get("path")]
-    if source.branch_roots:
-        declared = list(source.branch_roots)
+    explicit = bool(source.branch_roots)
+    declared = ([str(p) for p in source.branch_roots] if explicit
+                else [b.get("path") for b in client.branches() if b.get("path")])
 
     sample_paths: List[str] = []
     if not declared:
@@ -54,7 +62,8 @@ def analyse(
         except Exception as exc:
             log.debug("could not sample the item tree: %s", exc)
 
-    tfvc_layout = detect_layout(project_root, declared, sample_paths)
+    tfvc_layout = detect_layout(project_root, declared, sample_paths,
+                                explicitly_configured=explicit)
     analysis.layout = DetectedLayout(
         mode=LayoutMode.CUSTOM,
         trunk=tfvc_layout.main_root,
@@ -105,6 +114,35 @@ def analyse(
                          f"{analysis.revision_count:,} changesets, "
                          f"{len(analysis.authors)} authors")
     return analysis
+
+
+def _assert_project_root(client: TfvcClient, project_root: str) -> None:
+    """Fail early, and usefully, when the configured project path is not there."""
+    from ..errors import Svn2GitlabError
+
+    try:
+        roots = client.list_items("$/", recursive=False)
+    except Exception as exc:
+        log.debug("could not list the TFVC root (%s); skipping the existence check", exc)
+        return
+
+    available = sorted(
+        item.get("path", "") for item in roots
+        if item.get("isFolder") and (item.get("path") or "") not in ("$/", "")
+    )
+    if not available or project_root in available:
+        return
+
+    listed = "\n    ".join(available[:40])
+    more = f"\n    ... and {len(available) - 40} more" if len(available) > 40 else ""
+    raise Svn2GitlabError(
+        f"{project_root} does not exist in this collection",
+        "The collection name and the team project name are often different - the "
+        "collection is the part in the URL, the project is a folder beneath $/.\n"
+        f"  Projects available here:\n    {listed}{more}\n"
+        "  Set `source.project` (and `source.project_root` if it differs) to one "
+        "of these.",
+    )
 
 
 def _iso(value: str) -> Optional[str]:
@@ -188,6 +226,16 @@ def _findings(analysis: RepoAnalysis, layout, known_authors, lfs_enabled: bool,
     analysis.add("info", "api-version",
                  f"The server negotiated REST api-version {api_version}.",
                  "TFS 2015 speaks 2.0, 2017 speaks 3.x, 2018 speaks 4.x.")
+
+    if layout.main_is_a_guess:
+        analysis.add(
+            "warning", "mainline-guessed",
+            f"No branch is named Main, Trunk or Master, so {layout.main_root} was "
+            f"picked as the mainline simply because it sorts first. It becomes your "
+            f"default branch in GitLab.",
+            "Confirm which branch is really the mainline and list it FIRST in "
+            "`source.branch_roots`. Getting this wrong publishes a side branch as "
+            "the default branch that everyone clones.")
 
     analysis.add("warning", "no-tags",
                  "TFVC has no tag concept, so no Git tags are created. Labels are "

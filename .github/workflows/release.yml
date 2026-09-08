@@ -38,6 +38,56 @@ jobs:
       - name: Test before packaging
         run: pytest -q
 
+      - name: Bundle Git (MinGit) into the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Downloaded at BUILD time and shipped inside the package, so installation
+          # needs no internet at all. The client site runs behind a VPN that blocks
+          # public DNS, where download-on-demand simply cannot work - and a migration
+          # host is exactly the kind of machine that is locked down.
+          #
+          # MinGit is Git for Windows' own redistributable, published for embedding.
+          # `git fast-import`, which the converter depends on, is a builtin of
+          # git.exe rather than a separate binary, so MinGit is sufficient.
+          $tag = "v2.55.0.windows.5"
+          $name = "MinGit-2.55.0.5-64-bit.zip"
+          $url = "https://github.com/git-for-windows/git/releases/download/$tag/$name"
+          Write-Host "downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile mingit.zip -MaximumRedirection 5
+          $sha = (Get-FileHash mingit.zip -Algorithm SHA256).Hash
+          Write-Host "MinGit SHA256: $sha"
+
+          $vendor = "installer/vendor/git"
+          if (Test-Path $vendor) { Remove-Item -Recurse -Force $vendor }
+          New-Item -ItemType Directory -Path $vendor -Force | Out-Null
+          Expand-Archive -Path mingit.zip -DestinationPath $vendor -Force
+
+          foreach ($required in @("cmd/git.exe", "mingw64/bin/git.exe", "LICENSE.txt")) {
+            if (-not (Test-Path (Join-Path $vendor $required))) {
+              throw "MinGit is missing $required - refusing to ship an incomplete Git"
+            }
+          }
+          # GPLv2 obliges us to ship the licence with the binary and to say where the
+          # corresponding source is. Both travel with the package.
+          Copy-Item (Join-Path $vendor "LICENSE.txt") (Join-Path $vendor "GIT-LICENSE.txt")
+          # Built as an array rather than a here-string: PowerShell requires the
+          # closing "@ at column zero, which cannot coexist with YAML indentation.
+          $offer = @(
+            "This package includes Git for Windows (MinGit) $name, unmodified.",
+            "",
+            "Git is free software under the GNU General Public License version 2.",
+            "Its licence travels with this file as GIT-LICENSE.txt.",
+            "",
+            "Complete corresponding source for this exact build is published at:",
+            "  https://github.com/git-for-windows/git/releases/tag/$tag",
+            "",
+            "SHA-256 of the redistributable bundled here:",
+            "  $sha"
+          )
+          Set-Content -Path (Join-Path $vendor "GIT-SOURCE-OFFER.txt") -Value $offer
+          Write-Host "bundled Git staged into $vendor"
+
       - name: Freeze with PyInstaller
         run: pyinstaller installer/svn2gitlab.spec --noconfirm --clean
 
@@ -46,6 +96,30 @@ jobs:
 
       - name: Check the binary will load on Windows Server 2016
         run: python installer/check_os_floor.py dist/svn2gitlab/svn2gitlab.exe
+
+      - name: Prove the bundled Git works with no system Git present
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The bundle is worthless if the tool cannot actually find it. Strip every
+          # Git directory from PATH and confirm `doctor` still resolves a git - and
+          # that the one it found lives inside our package, not elsewhere on the box.
+          $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -notmatch '(?i)git' }) -join ';'
+          if (Get-Command git.exe -ErrorAction SilentlyContinue) {
+            throw "a system git is still on PATH; this check would prove nothing"
+          }
+          $report = & .\dist\svn2gitlab\svn2gitlab.exe doctor --json | ConvertFrom-Json
+          if (-not $report.tools.git.available) {
+            throw "the bundled Git was not found - the package is not self-contained"
+          }
+          Write-Host "bundled git resolved to: $($report.tools.git.path)"
+          if ($report.tools.git.path -notmatch '(?i)svn2gitlab') {
+            throw "doctor found a git outside the package: $($report.tools.git.path)"
+          }
+          if (-not $report.sources.tfvc.ready) {
+            throw "TFVC migrations are not ready with only the bundled Git"
+          }
+          Write-Host "TFVC migrations are ready with no system Git installed."
 
       - name: Check the pinned prerequisite URL still resolves
         shell: pwsh

@@ -176,6 +176,16 @@ def _iso_to_git_date(value: str) -> str:
     return f"{int(parsed.timestamp())} +0000"
 
 
+def _server_message(response) -> str:
+    """TFS's own error text, which is almost always more precise than ours."""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    message = payload.get("message") if isinstance(payload, dict) else ""
+    return str(message).strip() if message else ""
+
+
 def _parse_change_types(raw: Any) -> List[str]:
     """`"rename, edit"` -> `["rename", "edit"]`. Also accepts a list."""
     if isinstance(raw, list):
@@ -268,13 +278,17 @@ class TfvcClient:
 
         query = dict(params or {})
         query.setdefault("api-version", self.api_version or PREFERRED_API_VERSIONS[0])
+        # Encoded here rather than left to the HTTP library, which renders a space as
+        # `+`. TFVC server paths very often contain spaces ("$/Daily Mail Scheduler"),
+        # and TFS reads that plus literally, then reports the item does not exist.
+        encoded = urlencode({k: str(v) for k, v in query.items()}, quote_via=quote)
         url = self._url(resource, project_scoped=project_scoped)
         headers = {"Accept": accept} if accept else None
 
         last_error: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                response = self.session.get(url, params=query, headers=headers,
+                response = self.session.get(url, params=encoded, headers=headers,
                                             timeout=self.timeout, stream=raw)
             except requests.exceptions.SSLError as exc:
                 raise TfvcError(
@@ -315,15 +329,18 @@ class TfvcClient:
                     "readable collection cannot be migrated faithfully.",
                 )
             if response.status_code == 404:
+                detail = _server_message(response)
                 raise TfvcError(
-                    f"not found: {url}",
-                    "Check the collection name and team project. On-premises URLs "
-                    "usually look like https://tfs.example.com/tfs/DefaultCollection.",
+                    f"TFS returned 404 for {resource}"
+                    + (f": {detail}" if detail else f" ({url})"),
+                    "If the message names an item that does not exist, check "
+                    "`source.project` / `source.project_root`: the team project is "
+                    "often not the same name as the collection. "
+                    "`svn2gitlab analyze` lists the projects it can see.",
                 )
             if not response.ok:
-                raise TfvcError(
-                    f"TFS request failed ({response.status_code}): "
-                    f"{response.text[:300]}")
+                detail = _server_message(response) or response.text[:300]
+                raise TfvcError(f"TFS request failed ({response.status_code}): {detail}")
 
             # An HTML response means the server answered with a sign-in page rather
             # than JSON, which is a silent auth failure on some IIS configurations.
@@ -558,7 +575,10 @@ class TfvcClient:
         """
         params: Dict[str, Any] = {
             "scopePath": scope_path,
-            "recursionLevel": "full" if recursive else "oneLevel",
+            # Capitalised exactly as the server demands. TFS rejects "full" with
+            # a 400 listing the valid values, and because the tree listing is what
+            # verification reads, a lowercase value made every branch fail to verify.
+            "recursionLevel": "Full" if recursive else "OneLevel",
         }
         if version:
             params["versionDescriptor.version"] = version

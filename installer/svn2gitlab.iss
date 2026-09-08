@@ -15,7 +15,7 @@
 
 #define AppName        "svn2gitlab"
 #define AppURL         "https://github.com/Virtual-Tech-Box/svn-to-gitlab"
-#define AppVersion     "1.1.0-rc2"
+#define AppVersion     "1.1.0-rc3"
 #define AppPublisher   "Virtual Tech Box"
 #define AppExeName     "svn2gitlab.exe"
 #define SourceDir      "..\dist\svn2gitlab"
@@ -57,7 +57,7 @@ Name: "both"; Description: "Both sources"
 
 [Components]
 Name: "core"; Description: "svn2gitlab"; Types: tfs svn both; Flags: fixed
-Name: "prereq_git"; Description: "Git for Windows (required, installed if missing)"; Types: tfs svn both
+Name: "prereq_git"; Description: "Git for Windows (bundled - no download needed)"; Types: tfs svn both
 Name: "prereq_svn"; Description: "Subversion command-line client (only for SVN migrations)"; Types: svn both
 
 [Tasks]
@@ -67,6 +67,9 @@ Name: "desktopicon"; Description: "Create a Start Menu shortcut for the web dash
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}\docs"; DestName: "README.md"; Flags: ignoreversion
+; GPLv2 obliges us to ship Git's licence and say where its source is.
+Source: "vendor\git\GIT-LICENSE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "vendor\git\GIT-SOURCE-OFFER.txt"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\docs\RUNBOOK.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\examples\*"; DestDir: "{app}\examples"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
@@ -197,28 +200,36 @@ begin
     @OnDownloadProgress);
 end;
 
+function BundledGit(): string;
+begin
+  { Git is shipped inside the package. Tool discovery looks here first, so a
+    locked-down migration host needs no network at all. }
+  Result := '';
+  if FileExists(ExpandConstant('{app}\_internal\tools\git\cmd\git.exe')) then
+    Result := ExpandConstant('{app}\_internal\tools\git\cmd\git.exe')
+  else if FileExists(ExpandConstant('{app}\tools\git\cmd\git.exe')) then
+    Result := ExpandConstant('{app}\tools\git\cmd\git.exe');
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
   if CurPageID <> wpReady then
     exit;
 
+  { Only offer a download when the bundled copy is somehow absent AND the machine
+    has no Git of its own. On a normal install this never fires. }
   NeedGit := IsComponentSelected('prereq_git') and (FindOnPath('git.exe') = '');
-  { Subversion is deliberately not auto-installed. There is no single official
-    Windows build with a stable download URL - the common ones are third-party
-    repackagings - so guessing at one would be less reliable than telling the
-    operator exactly what to install. TFS migrations do not need it at all. }
   NeedSvn := False;
 
   if not NeedGit then
     exit;
 
-  if MsgBox('Git was not found on this machine, and every migration needs it.'
-    + #13#10#13#10
+  if MsgBox('Git was not found on this machine, and the bundled copy is missing'
+    + ' from this package.' + #13#10#13#10
     + 'Download and install Git for Windows now?' + #13#10#13#10
-    + 'This requires internet access. Choose No to skip and install it yourself'
-    + ' later from https://git-scm.com/download/win.',
-    mbConfirmation, MB_YESNO) = IDNO then
+    + 'This needs internet access. Choose No if this machine is offline and'
+    + ' install Git manually later.', mbConfirmation, MB_YESNO) = IDNO then
   begin
     NeedGit := False;
     exit;
@@ -231,8 +242,6 @@ begin
     try
       DownloadPage.Download;
     except
-      { A failed download must not fail the whole install - svn2gitlab itself is
-        already unpacked, and `svn2gitlab doctor` will say exactly what is missing. }
       MsgBox('Git could not be downloaded:' + #13#10#13#10
         + GetExceptionMessage + #13#10#13#10
         + 'Installation will continue. Install Git manually from'
@@ -273,14 +282,16 @@ begin
   InstallPrerequisites();
 
   GitPath := FindOnPath('git.exe');
+  if GitPath = '' then
+    GitPath := BundledGit();
   SvnPath := FindOnPath('svn.exe');
   SvnDir := VisualSvnBin();
   Message := '';
 
   if GitPath = '' then
     Message := Message +
-      '- Git was not found. It is required for every migration.' + #13#10 +
-      '  https://git-scm.com/download/win' + #13#10#13#10;
+      '- Git was not found, and the copy bundled with this package is missing.' + #13#10 +
+      '  Install it from https://git-scm.com/download/win' + #13#10#13#10;
 
   { Subversion matters only for SVN migrations. Demanding it on a machine that is
     only migrating TFS would report a healthy setup as broken. }

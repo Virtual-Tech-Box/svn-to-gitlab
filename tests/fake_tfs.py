@@ -346,6 +346,26 @@ class _Handler(BaseHTTPRequestHandler):
 
         scope = query.get("scopePath")
         if scope:
+            recursion = (query.get("recursionLevel") or "full").lower()
+            if recursion == "onelevel":
+                # Real TFS answers a one-level listing of $/ with the team project
+                # folders. Returning only files here made a guard that depends on
+                # seeing those folders silently untestable.
+                prefix = scope.rstrip("/") + "/" if scope != "$/" else "$/"
+                children = set()
+                for changeset in self.history.changesets:
+                    for change in changeset.changes:
+                        path = change.item.path
+                        if not path.startswith(prefix):
+                            continue
+                        rest = path[len(prefix):].split("/")[0]
+                        if rest:
+                            children.add(prefix + rest)
+                value = [{"path": scope, "isFolder": True, "version": version}]
+                value += [{"path": c, "isFolder": True, "version": version}
+                          for c in sorted(children)]
+                self._json({"count": len(value), "value": value})
+                return
             items = self.history.tree_at(scope, version)
             self._json({"count": len(items), "value": [
                 {"path": i.path, "size": i.size, "hashValue": i.md5_base64,

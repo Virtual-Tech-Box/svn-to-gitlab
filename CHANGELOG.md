@@ -9,6 +9,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **The Windows installer now bundles Git instead of downloading it.** Fetching it
+  on demand failed at a client site, and always would have: migration hosts sit
+  behind VPNs and proxies that block public DNS, which is precisely the environment
+  this tool is built for. Git for Windows (MinGit) is downloaded when the release is
+  built and shipped inside the package, so installation needs no network at all. The
+  release build proves it by stripping every Git directory from PATH and confirming
+  the tool still resolves one from inside its own package.
+
 - The Windows installer refused to run on **Windows Server 2016**. Its minimum OS
   was set to build 10.0.17763 (Server 2019) when nothing in the tool needs anything
   newer; the gate is now 10.0.14393, which is Server 2016 / Windows 10 1607.

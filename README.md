@@ -47,6 +47,10 @@ Download `svn2gitlab-setup-<version>.exe` from
 installs to `Program Files`, adds the tool to `PATH`, creates a working area under
 `C:\ProgramData\svn2gitlab`, and checks for the external tools described below.
 
+**Git is bundled** — the installer needs no internet access, which matters because
+a migration host is usually a locked-down server behind a VPN or proxy. Nothing is
+downloaded during installation.
+
 A portable zip is published alongside it if you would rather not run an installer.
 The binaries are **not code-signed**, so SmartScreen will warn on first run.
 
@@ -67,7 +71,7 @@ anything that is not.
 
 | Tool | Needed for | Notes |
 | --- | --- | --- |
-| `git` | Everything | Any reasonably recent build. |
+| `git` | Everything | **Bundled with the Windows installer**; nothing to install. Any reasonably recent build works if you supply your own. |
 | `svn`, `svnadmin` | Everything | On a VisualSVN Server host these already exist in `C:\Program Files\VisualSVN Server\bin` — either add it to `PATH` or list the folder under `tool_dirs:`. |
 | `svnsync` / `svnrdump` | Mirroring a *remote* repository locally | Either will do; `svnsync` is preferred. |
 | `git-lfs` | Only if `convert.lfs.enabled` | |
