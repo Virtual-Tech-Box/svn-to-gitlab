@@ -71,13 +71,22 @@ class BranchVerification:
     lfs_files: int = 0
     eol_normalised_matches: int = 0
     differences: List[Difference] = field(default_factory=list)
+    # Differences found but not listed, because `max_reported` capped the list. Kept
+    # separate so the *count* is never capped: a report that says "200 differences"
+    # when it found 1,245 understates the damage and reads like a small problem.
+    differences_omitted: int = 0
+    note: str = ""
     skipped: bool = False
     skip_reason: str = ""
     duration: float = 0.0
 
     @property
+    def difference_count(self) -> int:
+        return len(self.differences) + self.differences_omitted
+
+    @property
     def ok(self) -> bool:
-        return not self.differences and not self.skipped
+        return not self.difference_count and not self.skipped
 
     def to_dict(self) -> dict:
         return {
@@ -90,8 +99,11 @@ class BranchVerification:
             "files_matched": self.files_matched,
             "lfs_files": self.lfs_files,
             "eol_normalised_matches": self.eol_normalised_matches,
-            "difference_count": len(self.differences),
+            "difference_count": self.difference_count,
+            "differences_listed": len(self.differences),
+            "differences_omitted": self.differences_omitted,
             "differences": [d.to_dict() for d in self.differences],
+            "note": self.note,
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
             "duration": round(self.duration, 1),
@@ -126,7 +138,7 @@ class VerificationReport:
 
     @property
     def total_differences(self) -> int:
-        return sum(len(b.differences) for b in self.branches)
+        return sum(b.difference_count for b in self.branches)
 
     def to_dict(self) -> dict:
         return {

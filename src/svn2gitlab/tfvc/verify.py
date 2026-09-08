@@ -54,7 +54,7 @@ def verify_branch(
         items = client.list_items(branch_root, version=changeset, recursive=True)
     except Exception as exc:
         record.skipped = True
-        record.note = f"could not list {branch_root} at changeset {changeset}: {exc}"
+        record.skip_reason = f"could not list {branch_root} at changeset {changeset}: {exc}"
         return record
 
     prefix = branch_root.rstrip("/") + "/"
@@ -137,14 +137,16 @@ def verify_branch(
             detail="present in the migrated branch but absent from TFVC"))
 
     if len(record.differences) > max_reported:
-        extra = len(record.differences) - max_reported
+        record.differences_omitted = len(record.differences) - max_reported
         record.differences = record.differences[:max_reported]
-        record.note = f"{extra} further difference(s) not listed"
+        record.note = (f"{record.differences_omitted} further difference(s) found but "
+                       f"not listed; raise `verify.max_reported_diffs` to see them")
 
     record.duration = time.time() - started
-    log.info("branch %s: %d/%d files matched, %d difference(s)",
+    log.info("branch %s: %d/%d files matched, %d difference(s)%s",
              branch, record.files_matched, record.files_compared,
-             len(record.differences))
+             record.difference_count,
+             f" ({len(record.differences)} listed)" if record.differences_omitted else "")
     return record
 
 

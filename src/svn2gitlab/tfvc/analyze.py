@@ -13,7 +13,8 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from ..config import LayoutMode, SourceConfig
 from ..logging_setup import get_logger
-from ..svn.analyze import DetectedLayout, RepoAnalysis, _case_insensitive_collisions
+from ..svn.analyze import (NO_EXTENSION, DetectedLayout, RepoAnalysis,
+                           _case_insensitive_collisions)
 from .client import TfvcClient
 from .convert import detect_layout
 
@@ -178,7 +179,7 @@ def _measure_tree(client: TfvcClient, scope: str, analysis: RepoAnalysis,
         total += size
         path = item.get("path", "")
         name = path.rsplit("/", 1)[-1]
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        ext = name.rsplit(".", 1)[-1].lower() if "." in name else NO_EXTENSION
         extensions[ext] = extensions.get(ext, 0) + size
         if size >= lfs_threshold_bytes:
             lfs_count += 1

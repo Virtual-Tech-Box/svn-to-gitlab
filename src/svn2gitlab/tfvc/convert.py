@@ -13,11 +13,14 @@ Where TFVC differs, and why each matters:
 * **`changeType` is a flags enum.** `rename, edit` is one change that both moves a
   file and alters its bytes. Handling only the rename leaves the new path holding
   the old content.
-* **Branch creation enumerates every file.** TFVC emits a `branch` change per item,
-  not a single directory copy. Replaying those literally would download an entire
-  branch's worth of content that Git already has; instead the folder-level `branch`
-  change is resolved with fast-import's `ls`, exactly as SVN directory copies are,
-  and the per-file children are skipped.
+* **Branch creation enumerates every file, and that list is the authority.** TFVC
+  emits a `branch` change per item, each carrying the item's own version. It is
+  tempting to skip them and copy the source branch's tree wholesale with
+  fast-import's `ls`, the way SVN directory copies are resolved — but a TFVC branch
+  can be cut from *any* version, not just the source's tip, so the copied tree is
+  frequently the wrong one. Worse, a branch cut from an already-wrong branch inherits
+  and compounds the error. The per-file records are used instead; deduplicating on
+  the content hash keeps that cheap.
 * **Content arrives over HTTP, one item at a time.** Item content at a changeset is
   immutable and frequently duplicated across branches, so blobs are cached by
   content hash and written to the stream once.
@@ -328,21 +331,28 @@ class TfvcConverter:
 
     def _commit(self, importer: FastImport, changeset: Changeset, key: str,
                 changes: List[Change]) -> None:
-        # A folder-level `branch` change means the whole tree was copied. Resolve it
-        # from the source commit and drop the per-file children TFVC also emits,
-        # rather than downloading a branch's worth of content Git already holds.
+        # A folder-level `branch` change supplies the new branch's *parent*, and
+        # nothing else.
+        #
+        # It used to supply the content too: the source commit's tree was copied
+        # wholesale with `ls` and the per-file `branch` records TFVC emits were
+        # skipped, on the reasoning that Git already held those bytes. That is wrong.
+        # `_branch_copy_source` resolves the source to whatever the *converted* source
+        # branch's head happens to be, which is not necessarily the version TFVC
+        # branched from — and a branch cut from an already-stale branch inherits the
+        # error. It produced branches silently short by a few hundred files, worst on
+        # branches cut from branches.
+        #
+        # TFVC already states exactly what the branch contains: one record per file,
+        # carrying that file's item version. That is the authority now. The cost is
+        # metadata rather than bandwidth, because `_blob_for` dedupes on the content
+        # hash *before* fetching, and a branch copy is by definition content already
+        # seen.
         branch_copy = self._branch_copy_source(changes)
-        skip_prefixes: List[str] = []
-        if branch_copy is not None:
-            root_change, source_ref = branch_copy
-            skip_prefixes.append(root_change.path.rstrip("/") + "/")
 
         payload: List[Tuple[Change, Optional[int]]] = []
         for change in changes:
             if change.is_folder:
-                continue
-            if any(change.path.startswith(prefix) for prefix in skip_prefixes) \
-                    and change.is_branch_creation:
                 continue
             mark = None
             if change.touches_content and not change.is_delete:
@@ -369,16 +379,12 @@ class TfvcConverter:
             parent=parent,
         )
 
-        if branch_copy is not None:
-            root_change, source_ref = branch_copy
-            result = importer.ls(source_ref, "")
-            if result.missing:
-                self.result.unresolved_branches.append(
-                    f"cs{changeset.id}: {root_change.path} <- {root_change.source_path}")
-            else:
-                if parent is not None and parent != source_ref:
-                    importer.deleteall()
-                importer.filemodify("040000", result.dataref, "")
+        # Re-branching over a branch that already holds content replaces its whole
+        # tree, so start from empty and let the per-file records below rebuild it.
+        # Only when the branch *root* itself was branched: branching a subfolder into
+        # an existing branch must not wipe the rest of it.
+        if branch_copy is not None and parent is not None and branch_copy[0]:
+            importer.deleteall()
 
         for change, blob_mark in payload:
             self._apply(importer, change, blob_mark)
@@ -391,7 +397,12 @@ class TfvcConverter:
         self.result.branches[self.mapper.branch_name(key)] = f":{mark}"
 
     def _branch_copy_source(self, changes: List[Change]):
-        """The folder-level branch change and the commit to copy its tree from."""
+        """`(branched_at_the_branch_root, parent_ref)` for a branch creation.
+
+        Only the ancestry comes from here. The content comes from the per-file
+        `branch` records in the changeset, which carry TFVC's own item versions — see
+        the note in `_commit` for why trusting the source branch's tree was wrong.
+        """
         for change in changes:
             if not (change.is_folder and change.is_branch_creation and change.source_path):
                 continue
@@ -401,7 +412,8 @@ class TfvcConverter:
             head = self._head_at(source[0], 10 ** 9)
             if head is None:
                 continue
-            return change, self._ref_of(head)
+            target = self.mapper.classify(change.path)
+            return bool(target and target[2]), self._ref_of(head)
         return None
 
     def _blob_for(self, importer: FastImport, change: Change) -> Optional[int]:

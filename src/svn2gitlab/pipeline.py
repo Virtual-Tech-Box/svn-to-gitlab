@@ -263,9 +263,32 @@ class MigrationPipeline:
                 from .tfvc.mirror import TfvcMirror
                 from .tfvc.convert import detect_layout
                 source = self.repo.source
+                explicit = bool(source.branch_roots)
                 declared = list(source.branch_roots) or [
                     b.get("path") for b in self.tfvc.branches() if b.get("path")]
-                tfvc_layout = detect_layout(source.tfvc_project_root(), declared)
+                # `explicitly_configured` must match what `analyze` was told, or the
+                # two disagree about which branch is the mainline: analyze honours the
+                # operator's ordering while conversion falls back to picking
+                # alphabetically. That published a side branch as `main` while the
+                # report cheerfully named a different one, and the `mainline-guessed`
+                # warning stayed silent because analyze had made the right choice.
+                tfvc_layout = detect_layout(source.tfvc_project_root(), declared,
+                                            explicitly_configured=explicit)
+
+                # Verification cannot catch a wrong mainline: it compares whatever
+                # `main` holds against whatever the conversion decided `main` meant, so
+                # a side branch published as the default branch verifies perfectly.
+                # The only defence is that the two layouts must agree.
+                reported = getattr(self.analysis.layout, "trunk", "") or ""
+                if reported and tfvc_layout.main_root and reported != tfvc_layout.main_root:
+                    raise ConversionError(
+                        f"the analysis reported {reported} as the mainline but the "
+                        f"conversion resolved {tfvc_layout.main_root}",
+                        "These must agree - the mainline becomes the default branch "
+                        "everyone clones, and a mismatch here publishes a different "
+                        "branch than the report describes. Re-run `analyze`, and set "
+                        "`source.branch_roots` with the mainline first.",
+                    )
                 self._mirror = TfvcMirror(
                     tools=self.tools,
                     repo_dir=self.repo.mirror_dir,
@@ -951,8 +974,8 @@ class MigrationPipeline:
             if not changeset:
                 record = BranchVerification(branch=branch, git_ref=branch)
                 record.skipped = True
-                record.note = ("no changeset trailer on this branch, so there is "
-                               "nothing to compare against")
+                record.skip_reason = ("no changeset trailer on this branch, so there "
+                                      "is nothing to compare against")
                 report.branches.append(record)
                 continue
 
@@ -1036,6 +1059,12 @@ class MigrationPipeline:
             manifest.export = (stored["export"].result or {}) if "export" in stored else {}
             manifest.push = (stored["push"].result or {}) if "push" in stored else {}
             manifest.verification = (stored["verify"].result or {}) if "verify" in stored else {}
+            if not manifest.verification and outcome.verification is not None:
+                # `_stage_verify` raises on a mismatch, so it never returns a result to
+                # store — meaning the manifest lost every per-file difference in exactly
+                # the case an operator needs them, while the error text told them to go
+                # and read the report. The in-memory report is complete; use it.
+                manifest.verification = outcome.verification.to_dict()
             manifest.stages = [
                 {"name": s.name, "status": s.status.value, "duration": s.duration,
                  "message": s.message, "error": s.error}

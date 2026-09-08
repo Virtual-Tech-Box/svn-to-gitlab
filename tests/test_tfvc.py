@@ -311,10 +311,56 @@ def test_branch_creation_does_not_redownload_the_tree(converted):
     - the difference between minutes and hours on a real repository.
     """
     _repo, result = converted
-    # Only the six distinct file versions authored on Main are fetched; the four
-    # branch-copy items are resolved from the existing commit instead.
+    # Only the six distinct file versions authored on Main are fetched. The branch's
+    # own per-file records are still honoured (that is what makes the content
+    # correct), but they dedupe on the content hash *before* any request is made, so
+    # a branch copy costs metadata rather than bandwidth.
     assert result.blobs_written <= 6
     assert result.bytes_downloaded < 2000
+
+
+def test_branch_content_comes_from_tfvc_not_the_source_branch_head(tmp_path):
+    """A branch cut from an older version must not inherit the source's newest bytes.
+
+    TFVC lets you branch from any version, and records the exact item version of every
+    file in the branch. Resolving the copy from the converted source branch's *head*
+    instead - which is what the whole-tree `ls` shortcut did - silently produces a
+    branch holding the wrong content, and the error is inherited by anything branched
+    from it in turn.
+
+    This is a regression test for a real migration: ~4,800 files across ten branches
+    were stale, and every one of them looked fine until byte-for-byte verification.
+    The old fake could not express this because it only ever branched from the tip.
+    """
+    root = "$/P"
+    h = TfvcHistory("P")
+    h.commit("CONTOSO\\alice", "start", [
+        h.mkdir(f"{root}/Main", is_branch=True),
+        h.add(f"{root}/Main/a.txt", b"version one\n"),
+    ])
+    h.commit("CONTOSO\\alice", "move on", [
+        h.edit(f"{root}/Main/a.txt", b"version two\n"),
+    ])
+    # Branched from changeset 1, so the branch holds "version one" even though Main
+    # has already moved to "version two".
+    h.commit("CONTOSO\\alice", "Branched from $/P/Main", [
+        h.branch(f"{root}/Rel", f"{root}/Main", is_folder=True),
+        h.branch(f"{root}/Rel/a.txt", f"{root}/Main/a.txt", b"version one\n"),
+    ])
+    h.branches = [f"{root}/Main", f"{root}/Rel"]
+
+    repo = tmp_path / "mirror"
+    subprocess.run([GIT, "init", "-q", "-b", "main", str(repo)], check=True)
+    with FakeTfs(h) as tfs:
+        client = TfvcClient(tfs.url, collection="DefaultCollection", project="P",
+                            token=tfs.token)
+        client.probe()
+        layout = detect_layout(root, [b["path"] for b in client.branches()])
+        TfvcConverter(client, GIT, repo, layout, author_map(), default_branch="main",
+                      collection_url=tfs.url).convert(list(client.iter_changesets()))
+
+    assert blob(repo, "refs/remotes/tfvc/main", "a.txt") == b"version two\n"
+    assert blob(repo, "refs/remotes/tfvc/Rel", "a.txt") == b"version one\n"
 
 
 def test_changeset_id_is_recorded_for_incremental_sync(converted):
