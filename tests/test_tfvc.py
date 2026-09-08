@@ -319,6 +319,50 @@ def test_branch_creation_does_not_redownload_the_tree(converted):
     assert result.bytes_downloaded < 2000
 
 
+def test_a_merge_does_not_resurrect_a_deleted_file(tmp_path):
+    """A bare `merge` record must not put a deleted file back.
+
+    TFVC's `merge` is a relationship flag, not an action - `merge, edit` changes
+    content, `merge, delete` removes, a bare `merge` does neither. When a merge
+    propagates a deletion, TFS reports a bare `merge` on a path that stays deleted.
+
+    Treating it as content-bearing resurrected 730 files across two branches of a real
+    migration. Nothing caught it: the resurrected bytes came from the converter's hash
+    cache, so no request was made that could have returned 404, and verification only
+    surfaced it once the reporting cap stopped hiding it behind content errors.
+    """
+    root = "$/P"
+    h = TfvcHistory("P")
+    h.commit("CONTOSO\\alice", "start", [
+        h.mkdir(f"{root}/Main", is_branch=True),
+        h.add(f"{root}/Main/keep.txt", b"keep\n"),
+        h.add(f"{root}/Main/gone.module.ts", b"module\n"),
+    ])
+    h.commit("CONTOSO\\alice", "Remove module files from component folders.", [
+        h.delete(f"{root}/Main/gone.module.ts"),
+    ])
+    # The merge that propagates that deletion. TFS reports it exactly like this.
+    h.commit("CONTOSO\\alice", "Meger", [
+        h.merge(f"{root}/Main/gone.module.ts"),
+        h.merge(f"{root}/Main/keep.txt", b"keep, merged\n", edited=True),
+    ])
+    h.branches = [f"{root}/Main"]
+
+    repo = tmp_path / "mirror"
+    subprocess.run([GIT, "init", "-q", "-b", "main", str(repo)], check=True)
+    with FakeTfs(h) as tfs:
+        client = TfvcClient(tfs.url, collection="DefaultCollection", project="P",
+                            token=tfs.token)
+        client.probe()
+        layout = detect_layout(root, [b["path"] for b in client.branches()])
+        TfvcConverter(client, GIT, repo, layout, author_map(), default_branch="main",
+                      collection_url=tfs.url).convert(list(client.iter_changesets()))
+
+    assert not exists(repo, "refs/remotes/tfvc/main", "gone.module.ts")
+    # `merge, edit` still carries content - the fix must not make merges inert.
+    assert blob(repo, "refs/remotes/tfvc/main", "keep.txt") == b"keep, merged\n"
+
+
 def test_branch_content_comes_from_tfvc_not_the_source_branch_head(tmp_path):
     """A branch cut from an older version must not inherit the source's newest bytes.
 

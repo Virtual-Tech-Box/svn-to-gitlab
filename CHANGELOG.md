@@ -9,6 +9,21 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **A TFVC merge could resurrect a deleted file.** `merge` was treated as a
+  content-bearing change flag, but in TFVC it is a *relationship* flag: the action
+  travels beside it as `merge, edit`, `merge, branch` or `merge, delete`. A bare
+  `merge` records that a merge happened without changing the item — including when
+  what was merged is a deletion, where TFS reports a bare `merge` on a path that is
+  already, and stays, deleted. The converter wrote the file back, and did so
+  silently, because the bytes came from its content-hash cache and no request was
+  made that could have returned 404. On the first production migration this restored
+  730 files that had been deleted, across two branches. `merge` alone no longer
+  implies content; `merge, edit` and the rest are unaffected.
+
+  The fake TFS shared the same wrong assumption — any non-delete change counted as a
+  resurrection — so it would have made the defect look correct. It now models what
+  the server actually does.
+
 - **TFVC branch content came from the wrong place.** A folder-level `branch` change
   was treated as a whole-tree copy from the *converted* source branch's head, and the
   per-file `branch` records TFVC emits alongside it were discarded. TFVC branches from

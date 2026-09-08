@@ -137,8 +137,17 @@ class Change:
 
         A rename with no edit keeps its content; a `rename, edit` does not. Missing
         this distinction is how a renamed-and-edited file ends up with stale content.
+
+        `merge` is *not* in this set, and that is the point. It is a relationship
+        flag, not an action: the action travels beside it as `merge, edit`,
+        `merge, branch` or `merge, delete`. A bare `merge` records that a merge
+        happened without changing the item - and when what was merged is a deletion,
+        TFS reports a bare `merge` on a path that is already, and stays, deleted.
+        Treating that as content resurrected 730 deleted files across two branches of
+        a customer migration, silently, because `_blob_for` served the bytes from its
+        hash cache and never made a request that could have 404'd.
         """
-        return self.has("add", "edit", "branch", "undelete", "merge", "rollback")
+        return self.has("add", "edit", "branch", "undelete", "rollback")
 
     @property
     def is_metadata_only(self) -> bool:

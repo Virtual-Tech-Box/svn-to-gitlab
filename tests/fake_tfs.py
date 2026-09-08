@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 DEFAULT_MAX_COMMENT = 80
 
+# Change flags that actually put an item at a path. `merge` is deliberately absent:
+# it records a merge relationship, and the action it carries travels beside it.
+RESURRECTS = ("add", "edit", "branch", "undelete", "rollback", "rename")
+
 
 @dataclass
 class FakeItem:
@@ -123,6 +127,17 @@ class TfvcHistory:
         return FakeChange(FakeItem(path, content, is_folder=is_folder, is_branch=is_folder),
                           ["branch"], source_path=source_path)
 
+    def merge(self, path: str, content: Optional[bytes] = None,
+              edited: bool = False) -> FakeChange:
+        """A merge record. Bare `merge` changes nothing; `merge, edit` writes content.
+
+        Both shapes are real: TFS emits `merge, edit` when the merge alters the
+        target, and a bare `merge` when it does not - including when what was merged
+        was a deletion, in which case the path stays deleted.
+        """
+        kinds = ["merge", "edit"] if edited else ["merge"]
+        return FakeChange(FakeItem(path, content), kinds)
+
     # -- queries used by the handler ------------------------------------------
 
     def content_at(self, path: str, version: int) -> Optional[bytes]:
@@ -146,8 +161,15 @@ class TfvcHistory:
                     continue
                 if "delete" in change.change_types:
                     deleted = True
-                elif change.change_types:
+                elif any(k in change.change_types for k in RESURRECTS):
                     deleted = False
+                # A bare `merge` is a relationship record, not an action: the real
+                # action travels beside it (`merge, edit`, `merge, delete`). A merge
+                # that propagates a deletion is reported by TFS as a bare `merge` on
+                # a path that stays deleted - observed on TFS 2018, changeset 2355 of
+                # a customer repository, where the item 404s at every version after
+                # its delete. Treating it as a resurrection is what made a converter
+                # bug look correct here.
         return deleted
 
     def tree_at(self, scope_path: str, version: int) -> List[FakeItem]:
@@ -165,6 +187,8 @@ class TfvcHistory:
                     for child in [p for p in seen if p.startswith(path + "/")]:
                         seen.pop(child, None)
                     continue
+                if not any(k in change.change_types for k in RESURRECTS):
+                    continue    # bare `merge`: records a relationship, adds nothing
                 if change.source_path and "rename" in change.change_types:
                     seen.pop(change.source_path, None)
                 seen[path] = change.item
