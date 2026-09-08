@@ -9,6 +9,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **A TFVC rename with no edit deleted the file.** `rename` carries no content flag,
+  so nothing was written at the new path while the old one was removed — the file
+  vanished. Only `rename, edit` was ever tested, where the edit supplied the bytes and
+  masked it. A rename now moves the existing object, resolved from the parent tree, so
+  it costs no download.
+
+- **A folder-level delete removed nothing, and a folder-level rename moved nothing.**
+  Every folder change was skipped on the grounds that folders carry no content, but
+  TFVC can delete or rename a folder with no per-file records at all, and both move
+  the entire subtree. Deleted folders stayed in the migrated branch indefinitely.
+
 - **A TFVC merge could resurrect a deleted file.** `merge` was treated as a
   content-bearing change flag, but in TFVC it is a *relationship* flag: the action
   travels beside it as `merge, edit`, `merge, branch` or `merge, delete`. A bare

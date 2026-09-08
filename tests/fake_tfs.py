@@ -127,6 +127,15 @@ class TfvcHistory:
         return FakeChange(FakeItem(path, content, is_folder=is_folder, is_branch=is_folder),
                           ["branch"], source_path=source_path)
 
+    def delete_folder(self, path: str) -> FakeChange:
+        """A folder-level delete with no per-file records, which TFS does emit."""
+        return FakeChange(FakeItem(path, None, is_folder=True), ["delete"])
+
+    def rename_folder(self, old_path: str, new_path: str) -> FakeChange:
+        """A folder-level rename with no per-file records."""
+        return FakeChange(FakeItem(new_path, None, is_folder=True), ["rename"],
+                          source_path=old_path)
+
     def merge(self, path: str, content: Optional[bytes] = None,
               edited: bool = False) -> FakeChange:
         """A merge record. Bare `merge` changes nothing; `merge, edit` writes content.

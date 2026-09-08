@@ -319,6 +319,96 @@ def test_branch_creation_does_not_redownload_the_tree(converted):
     assert result.bytes_downloaded < 2000
 
 
+def _convert(tmp_path, history, root="$/P"):
+    """Convert a hand-built history and return the mirror repository."""
+    repo = tmp_path / "mirror"
+    subprocess.run([GIT, "init", "-q", "-b", "main", str(repo)], check=True)
+    with FakeTfs(history) as tfs:
+        client = TfvcClient(tfs.url, collection="DefaultCollection", project="P",
+                            token=tfs.token)
+        client.probe()
+        layout = detect_layout(root, [b["path"] for b in client.branches()])
+        TfvcConverter(client, GIT, repo, layout, author_map(), default_branch="main",
+                      collection_url=tfs.url).convert(list(client.iter_changesets()))
+    return repo
+
+
+def test_a_folder_delete_removes_its_children(tmp_path):
+    """TFVC can delete a folder with no per-file records. The subtree must go.
+
+    Every folder change was skipped outright, so a folder-level delete removed
+    nothing and the files stayed in the migrated branch forever.
+    """
+    root = "$/P"
+    h = TfvcHistory("P")
+    h.commit("CONTOSO\\alice", "start", [
+        h.mkdir(f"{root}/Main", is_branch=True),
+        h.add(f"{root}/Main/keep.txt", b"keep\n"),
+        h.add(f"{root}/Main/dead/a.txt", b"a\n"),
+        h.add(f"{root}/Main/dead/deep/b.txt", b"b\n"),
+    ])
+    h.commit("CONTOSO\\alice", "drop the folder", [h.delete_folder(f"{root}/Main/dead")])
+    h.branches = [f"{root}/Main"]
+
+    repo = _convert(tmp_path, h)
+    assert exists(repo, "refs/remotes/tfvc/main", "keep.txt")
+    assert not exists(repo, "refs/remotes/tfvc/main", "dead/a.txt")
+    assert not exists(repo, "refs/remotes/tfvc/main", "dead/deep/b.txt")
+
+
+def test_a_folder_rename_moves_the_whole_subtree(tmp_path):
+    """A folder-level rename moves everything beneath it, at any depth."""
+    root = "$/P"
+    h = TfvcHistory("P")
+    h.commit("CONTOSO\\alice", "start", [
+        h.mkdir(f"{root}/Main", is_branch=True),
+        h.add(f"{root}/Main/old/a.txt", b"a\n"),
+        h.add(f"{root}/Main/old/deep/b.txt", b"b\n"),
+    ])
+    h.commit("CONTOSO\\alice", "rename the folder",
+             [h.rename_folder(f"{root}/Main/old", f"{root}/Main/new")])
+    h.branches = [f"{root}/Main"]
+
+    repo = _convert(tmp_path, h)
+    assert blob(repo, "refs/remotes/tfvc/main", "new/a.txt") == b"a\n"
+    assert blob(repo, "refs/remotes/tfvc/main", "new/deep/b.txt") == b"b\n"
+    assert not exists(repo, "refs/remotes/tfvc/main", "old/a.txt")
+
+
+def test_a_pure_rename_keeps_the_file(tmp_path):
+    """A rename with no edit must move the file, not delete it.
+
+    `rename` alone carries no content flag, so `_blob_for` produced nothing, and
+    `_apply` deleted the old path and wrote nothing at the new one - the file simply
+    vanished. The existing coverage only ever exercised `rename, edit`, where the
+    edit supplied the bytes and hid it. Git models a rename as the same blob at a new
+    path, so it resolves from the parent tree with no download.
+    """
+    root = "$/P"
+    h = TfvcHistory("P")
+    h.commit("CONTOSO\\alice", "start", [
+        h.mkdir(f"{root}/Main", is_branch=True),
+        h.add(f"{root}/Main/old.txt", b"payload\n"),
+    ])
+    h.commit("CONTOSO\\alice", "move it", [
+        h.rename(f"{root}/Main/old.txt", f"{root}/Main/sub/new.txt", b"payload\n"),
+    ])
+    h.branches = [f"{root}/Main"]
+
+    repo = tmp_path / "mirror"
+    subprocess.run([GIT, "init", "-q", "-b", "main", str(repo)], check=True)
+    with FakeTfs(h) as tfs:
+        client = TfvcClient(tfs.url, collection="DefaultCollection", project="P",
+                            token=tfs.token)
+        client.probe()
+        layout = detect_layout(root, [b["path"] for b in client.branches()])
+        TfvcConverter(client, GIT, repo, layout, author_map(), default_branch="main",
+                      collection_url=tfs.url).convert(list(client.iter_changesets()))
+
+    assert blob(repo, "refs/remotes/tfvc/main", "sub/new.txt") == b"payload\n"
+    assert not exists(repo, "refs/remotes/tfvc/main", "old.txt")
+
+
 def test_a_merge_does_not_resurrect_a_deleted_file(tmp_path):
     """A bare `merge` record must not put a deleted file back.
 

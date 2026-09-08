@@ -352,7 +352,10 @@ class TfvcConverter:
 
         payload: List[Tuple[Change, Optional[int]]] = []
         for change in changes:
-            if change.is_folder:
+            # Folders carry no content, but a folder that is deleted or renamed moves
+            # its whole subtree and must be replayed. Skipping every folder change
+            # meant a deleted folder's files simply stayed.
+            if change.is_folder and not (change.is_delete or change.is_rename):
                 continue
             mark = None
             if change.touches_content and not change.is_delete:
@@ -371,6 +374,23 @@ class TfvcConverter:
         if parent is None and branch_copy is not None:
             parent = branch_copy[1]
 
+        # A rename with no edit keeps its bytes, so TFVC sends no content flag and
+        # `_blob_for` produces nothing. Deleting the old path and writing nothing at
+        # the new one made the file disappear outright. Git models a rename as the
+        # same blob at a new path, so take it from the parent tree - exact, and no
+        # download.
+        renames: Dict[str, Tuple[str, str]] = {}
+        if parent is not None:
+            for change, blob_mark in payload:
+                if blob_mark is not None or change.is_delete or not change.is_rename:
+                    continue
+                old = self.mapper.classify(change.source_path) if change.source_path else None
+                if old is None or not old[1]:
+                    continue
+                found = importer.ls(parent, old[1])
+                if not found.missing:
+                    renames[change.path] = (found.mode, found.dataref)
+
         mark = importer.begin_commit(
             ref=self.mapper.ref(key),
             author=(name, email, when),
@@ -387,7 +407,7 @@ class TfvcConverter:
             importer.deleteall()
 
         for change, blob_mark in payload:
-            self._apply(importer, change, blob_mark)
+            self._apply(importer, change, blob_mark, renames)
 
         importer.end_commit()
 
@@ -435,7 +455,8 @@ class TfvcConverter:
         return mark
 
     def _apply(self, importer: FastImport, change: Change,
-               blob_mark: Optional[int]) -> None:
+               blob_mark: Optional[int],
+               renames: Optional[Dict[str, Tuple[str, str]]] = None) -> None:
         placed = self.mapper.classify(change.path)
         if placed is None:
             return
@@ -458,6 +479,13 @@ class TfvcConverter:
         if blob_mark is not None:
             mode = "120000" if change.is_symlink else "100644"
             importer.filemodify(mode, f":{blob_mark}", subpath)
+        elif renames and change.path in renames:
+            # Pure rename: the same object, moved. The mode comes from the parent tree
+            # so a renamed *folder* moves its whole subtree rather than being written
+            # as a file. Without this the new path is never written at all and the
+            # content is simply lost.
+            old_mode, dataref = renames[change.path]
+            importer.filemodify(old_mode, dataref, subpath)
 
     def _message(self, changeset: Changeset, key: str) -> bytes:
         text = (changeset.message or "").rstrip()
