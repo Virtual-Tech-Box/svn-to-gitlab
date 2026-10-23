@@ -14,12 +14,49 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 SVN_PREFIX = "svn/"
+TFVC_PREFIX = "tfvc/"
 
 # `git-svn-id: <url>@<rev> <uuid>` — the trailer we write and later parse back.
 _SVN_ID = re.compile(r"^git-svn-id:\s*(?P<url>\S+)@(?P<rev>\d+)\s+(?P<uuid>\S+)\s*$", re.M)
+# The TFVC equivalent: `tfs-changeset-id: <collection><project>@<changeset>`.
+_TFS_ID = re.compile(r"^tfs-changeset-id:\s*(?P<url>\S+)@(?P<rev>\d+)\s*$", re.M)
+
+
+@dataclass(frozen=True)
+class MirrorFormat:
+    """How one source's history is recorded in the mirror repository.
+
+    Subversion and TFVC produce the same *shape* — refs under `refs/remotes/<prefix>`
+    and a trailer naming the source version each commit came from — so the export,
+    verify and sync stages read the mirror through this description rather than
+    hard-coding Subversion's conventions.
+    """
+
+    name: str                 # "svn" | "tfvc"
+    prefix: str               # ref namespace under refs/remotes/
+    trailer: str              # trailer key, e.g. "git-svn-id"
+    version_word: str         # what one version is called, for human-facing messages
+    pattern: Any = None
+
+    @property
+    def ref_root(self) -> str:
+        return f"refs/remotes/{self.prefix}"
+
+    def extract_version(self, message: str) -> Optional[int]:
+        """The source version a commit came from, or None if the trailer is absent."""
+        match = self.pattern.search(message or "")
+        return int(match.group("rev")) if match else None
+
+
+SVN_FORMAT = MirrorFormat("svn", SVN_PREFIX, "git-svn-id", "revision", _SVN_ID)
+TFVC_FORMAT = MirrorFormat("tfvc", TFVC_PREFIX, "tfs-changeset-id", "changeset", _TFS_ID)
+
+
+def format_for(source_kind: str) -> MirrorFormat:
+    return TFVC_FORMAT if str(source_kind).lower() == "tfvc" else SVN_FORMAT
 
 
 @dataclass
@@ -29,6 +66,10 @@ class FetchResult:
     head_sha: str = ""
     duration: float = 0.0
     refs: Dict[str, str] = field(default_factory=dict)
+    # Paths Git could not store under their Subversion name, as "old -> new".
+    renamed_paths: List[str] = field(default_factory=list)
+    # Nodes left out because they matched `source.layout.ignore_paths`.
+    ignored_paths: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -37,6 +78,8 @@ class FetchResult:
             "head_sha": self.head_sha,
             "duration": round(self.duration, 1),
             "ref_count": len(self.refs),
+            "renamed_paths": self.renamed_paths[:50],
+            "ignored_paths": self.ignored_paths,
         }
 
 
@@ -51,3 +94,26 @@ def extract_svn_id(message: str) -> Optional[Dict[str, str]]:
     if not match:
         return None
     return {"url": match.group("url"), "rev": match.group("rev"), "uuid": match.group("uuid")}
+
+
+def escape_ref_name(name: str) -> str:
+    """Make a Subversion branch or tag name safe to use inside a Git ref.
+
+    The same reversible scheme git-svn uses: characters a ref cannot hold are
+    percent-encoded, and so is `%` itself so the encoding can be undone. A name like
+    `https:` - which is what a URL pasted into a TortoiseSVN "copy to" box leaves
+    under `branches/` - would otherwise make fast-import reject the whole stream.
+    """
+    name = re.sub(r"[ %~^:?*\[\t\\]", lambda m: f"%{ord(m.group()):02X}", name)
+    name = name.replace("/.", "/%2E")
+    if name.startswith("."):
+        name = "%2E" + name[1:]
+    name = name.replace("..", "%2E%2E")
+    name = re.sub(r"\.(?=$|/)", "%2E", name)
+    name = re.sub(r"\.lock$", "%2Elock", name)
+    return name.replace("@{", "%40{")
+
+
+def unescape_ref_name(name: str) -> str:
+    """Undo `escape_ref_name`."""
+    return re.sub(r"%([0-9A-F]{2})", lambda m: chr(int(m.group(1), 16)), name)

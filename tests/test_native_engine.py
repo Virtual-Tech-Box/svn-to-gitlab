@@ -363,3 +363,141 @@ def test_pipeline_converts_a_repository_end_to_end(tmp_path, svn_repo, migration
     pipeline = build_pipelines(config, state, dry_run=True)[0]
     outcome = pipeline.run()
     assert outcome.ok, outcome.error
+
+
+# --------------------------------------------------------------------------- #
+# Paths Git cannot store
+# --------------------------------------------------------------------------- #
+
+from svn2gitlab.convert.fastimport import portable_path
+from svn2gitlab.convert.mirrorfmt import escape_ref_name, unescape_ref_name
+
+
+@pytest.mark.parametrize("path,windows,expected", [
+    ("src/app.py", True, "src/app.py"),
+    ("branches/https:/host/svn/x", True, "branches/https%3A/host/svn/x"),
+    ("branches/https:/host/svn/x", False, "branches/https:/host/svn/x"),
+    ("lib/.git/config", False, "lib/%2Egit/config"),
+    ("lib/GIT~1/config", False, "lib/%67IT~1/config"),
+    ("docs/notes.", True, "docs/notes%2E"),
+    ("src/aux.c", True, "src/%61ux.c"),
+    ("src/auxiliary.c", True, "src/auxiliary.c"),
+])
+def test_portable_path(path, windows, expected):
+    assert portable_path(path, windows=windows) == expected
+
+
+@pytest.mark.parametrize("name", ["https:", "release 1.0", "50%off", "v1.", ".hidden", "a..b"])
+def test_ref_name_escaping_is_valid_and_reversible(name):
+    escaped = escape_ref_name(name)
+    check = subprocess.run(["git", "check-ref-format", f"refs/remotes/svn/{escaped}"])
+    assert check.returncode == 0, escaped
+    assert unescape_ref_name(escaped) == name
+
+
+def _dump(*revisions) -> bytes:
+    """A fulltext dump; each revision is a list of (path, kind, action, extras)."""
+    out = [b"SVN-fs-dump-format-version: 2\n\nUUID: test-uuid\n\n"]
+    for number, nodes in enumerate(revisions, 1):
+        props = (b"K 10\nsvn:author\nV 5\nalice\nK 8\nsvn:date\nV 27\n"
+                 b"2020-01-01T00:00:00.000000Z\nK 7\nsvn:log\nV 1\nx\nPROPS-END\n")
+        out.append(b"Revision-number: %d\nProp-content-length: %d\nContent-length: %d\n\n"
+                   % (number, len(props), len(props)) + props + b"\n")
+        for path, kind, action, extras in nodes:
+            head = f"Node-path: {path}\n"
+            if kind:
+                head += f"Node-kind: {kind}\n"
+            head += f"Node-action: {action}\n"
+            if "copyfrom" in extras:
+                src_path, src_rev = extras["copyfrom"]
+                head += f"Node-copyfrom-rev: {src_rev}\nNode-copyfrom-path: {src_path}\n"
+            body = b""
+            if "text" in extras:
+                text = extras["text"]
+                body = b"PROPS-END\n" + text
+                head += (f"Prop-content-length: 10\nText-content-length: {len(text)}\n"
+                         f"Content-length: {len(body)}\n")
+            out.append(head.encode() + b"\n" + body + b"\n\n")
+    return b"".join(out)
+
+
+def _convert_dump(tmp_path, data, layout, windows, ignore_paths=None):
+    target = tmp_path / "native"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
+    converter = NativeConverter(
+        git_exe="git", repo_dir=target, layout=layout,
+        convert=ConvertConfig(default_branch="main"), authors=author_map(),
+        emit_svn_id=False, ignore_paths=ignore_paths,
+    )
+    converter.windows = windows
+    result = converter.convert_stream(io.BytesIO(data))
+    return target, result
+
+
+FLAT = DetectedLayout(mode=LayoutMode.FLAT, trunk=".")
+URL_DIR = "P/branches/https:/10.0.0.1/svn/R/P/branches/v1.0/WebContent"
+
+# r1 creates a branch, r2 copies it to a URL pasted as a path (TortoiseSVN "copy to"),
+# r3 is the usual clean-up: move it somewhere sensible.
+PASTED_URL_HISTORY = _dump(
+    [("P", "dir", "add", {}), ("P/branches", "dir", "add", {}),
+     ("P/branches/v1.0", "dir", "add", {}),
+     ("P/branches/v1.0/WebContent", "dir", "add", {}),
+     ("P/branches/v1.0/WebContent/index.jsp", "file", "add", {"text": b"<html/>\n"})],
+    [("P/branches/https:", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1/svn", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1/svn/R", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1/svn/R/P", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1/svn/R/P/branches", "dir", "add", {}),
+     ("P/branches/https:/10.0.0.1/svn/R/P/branches/v1.0", "dir", "add", {}),
+     (URL_DIR, "dir", "add", {"copyfrom": ("P/branches/v1.0/WebContent", 1)})],
+    [("P/branches/v1.1", "dir", "add", {"copyfrom": (URL_DIR, 2)}),
+     ("P/branches/https:", "", "delete", {})],
+)
+
+
+def test_a_pasted_url_path_is_renamed_rather_than_crashing_fast_import(tmp_path):
+    """Git for Windows refuses `https:` as a path component: `fatal: invalid path`."""
+    target, result = _convert_dump(tmp_path, PASTED_URL_HISTORY, FLAT, windows=True)
+    assert result.renamed_paths == ["P/branches/https: -> P/branches/https%3A"]
+
+    at_r2 = git(target, "ls-tree", "-r", "--name-only", "refs/remotes/svn/trunk~1")
+    assert "P/branches/https%3A/10.0.0.1/svn/R/P/branches/v1.0/WebContent/index.jsp" in at_r2
+
+    # The clean-up copy *from* the renamed path must still find its content.
+    at_head = git(target, "ls-tree", "-r", "--name-only", "refs/remotes/svn/trunk")
+    assert at_head.splitlines() == ["P/branches/v1.0/WebContent/index.jsp",
+                                    "P/branches/v1.1/index.jsp"]
+    assert result.unresolved_copies == []
+
+
+def test_ignore_paths_leaves_matching_paths_out(tmp_path):
+    target, result = _convert_dump(tmp_path, PASTED_URL_HISTORY, FLAT, windows=True,
+                                   ignore_paths=r"/https:(/|$)")
+    assert result.renamed_paths == []
+    assert result.ignored_paths > 0
+    at_r2 = git(target, "ls-tree", "-r", "--name-only", "refs/remotes/svn/trunk~1")
+    assert "https" not in at_r2
+
+
+def test_a_committed_git_directory_is_renamed_on_every_platform(tmp_path):
+    data = _dump([("lib", "dir", "add", {}), ("lib/.git", "dir", "add", {}),
+                  ("lib/.git/HEAD", "file", "add", {"text": b"ref: x\n"})])
+    target, result = _convert_dump(tmp_path, data, FLAT, windows=False)
+    assert git(target, "ls-tree", "-r", "--name-only",
+               "refs/remotes/svn/trunk") == "lib/%2Egit/HEAD"
+    assert result.renamed_paths == ["lib/.git -> lib/%2Egit"]
+
+
+def test_a_branch_named_like_a_url_gets_a_valid_ref(tmp_path):
+    layout = DetectedLayout(mode=LayoutMode.STANDARD, trunk="trunk",
+                            branches=["branches"], tags=["tags"])
+    data = _dump(
+        [("trunk", "dir", "add", {}), ("branches", "dir", "add", {}),
+         ("trunk/a.txt", "file", "add", {"text": b"a\n"})],
+        [("branches/https:", "dir", "add", {"copyfrom": ("trunk", 1)})],
+    )
+    target, result = _convert_dump(tmp_path, data, layout, windows=False)
+    assert "refs/remotes/svn/https%3A" in git(target, "for-each-ref", "--format=%(refname)")
+    assert "https:" in result.branches

@@ -1,0 +1,86 @@
+# TFVC on an on-premises TFS 2015/2017/2018 -> GitLab
+#
+# History is read entirely over the REST API, so this can run from any machine that
+# can reach the TFS application tier - it does not have to run on the server, and it
+# needs no Visual Studio, no tf.exe and no Windows-only tooling.
+#
+# Before running:
+#   set TFS_TOKEN=<personal access token with the Code (read) scope>
+#   set GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+#   svn2gitlab analyze -c tfs-tfvc-to-gitlab.yaml     # read-only; changes nothing
+
+version: 1
+name: acme-tfvc
+
+workdir: D:\svn2gitlab\work
+
+source:
+  kind: tfvc
+
+  # The *collection* URL. On-premises this usually ends in /tfs/<Collection>;
+  # on Azure DevOps Services it is https://dev.azure.com/<organisation>.
+  url: https://tfs.acme.local/tfs
+  collection: DefaultCollection
+
+  # The team project. `project_root` is derived as $/<project> unless you set it.
+  project: Payments
+  # project_root: $/Payments
+
+  # A personal access token is the simplest option and works on TFS 2015 Update 3
+  # and later. For an older Windows-authenticated server, drop `token` and use
+  # username: ACME\svcmigration + password, and install requests-ntlm.
+  token: env:TFS_TOKEN
+  # username: ACME\svcmigration
+  # password: env:TFS_PASSWORD
+
+  # On-premises TFS often uses a private certificate authority.
+  verify_tls: true
+  # ca_bundle: C:\certs\acme-root-ca.pem
+
+  # Which server paths are branches. Leave empty to use the project's TFVC branch
+  # definitions, falling back to path conventions when there are none.
+  #
+  # Worth checking in the analysis report: a project that branched by *copying a
+  # folder* without converting it to a branch has no definitions, and guessing
+  # wrong silently merges separate lines of development into one.
+  branch_roots: []
+  # branch_roots:
+  #   - $/Payments/Main
+  #   - $/Payments/Branches/release-2024
+
+authors:
+  file: D:\svn2gitlab\authors-tfvc.txt
+  # TFVC identities look like ACME\jsmith or jsmith@acme.com; both normalise to
+  # jsmith before the domain below is appended.
+  default_domain: acme.com
+  policy: generate      # switch to `strict` once the file has been reviewed
+
+convert:
+  default_branch: main
+  strip_svn_metadata: true      # drop the changeset trailer from published messages
+  keep_revision_trailer: true   # keep `Svn-Revision: NNN` for traceability
+  # TFVC has no ignore property, so nothing is translated into .gitignore.
+  generate_gitignore: false
+  lfs:
+    enabled: false              # turn on if the analysis reports large binaries
+
+target:
+  gitlab_url: https://gitlab.com
+  token: env:GITLAB_TOKEN
+  namespace: acme/legacy
+  project: payments
+  visibility: private
+  create_namespace: true
+  protect_default_branch: true
+
+verify:
+  mode: full
+  verify_all_branches: true
+  fail_on_mismatch: true
+
+sync:
+  enabled: true
+  interval_minutes: 60
+  # The read-only cutover lock is Subversion-specific. For TFVC, deny the
+  # "Check in" permission on the team project in TFS at cutover instead.
+  lock_svn_on_cutover: false

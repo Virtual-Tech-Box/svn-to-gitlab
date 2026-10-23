@@ -217,6 +217,19 @@ class Git:
             "committer_date": lines[6], "message": "\n".join(lines[7:]).strip(),
         }
 
+    def cat_file(self, sha: str) -> bytes:
+        """Raw bytes of a blob. Binary-safe, unlike the text-mode helpers."""
+        import subprocess
+        result = subprocess.run(
+            [self.exe, "-C", str(self.repo), "cat-file", "blob", sha],
+            capture_output=True, env=self._env(),
+        )
+        if result.returncode != 0:
+            raise ConversionError(
+                f"could not read blob {sha[:12]}: "
+                f"{result.stderr.decode('utf-8', 'replace').strip()}")
+        return result.stdout
+
     def is_empty_commit(self, sha: str) -> bool:
         """True when the commit's tree is identical to its first parent's."""
         parent = self.run(["rev-parse", "--verify", "--quiet", f"{sha}^1"], check=False).stdout.strip()

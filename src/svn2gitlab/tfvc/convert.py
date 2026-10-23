@@ -1,0 +1,499 @@
+"""TFVC changesets to Git, via the same `git fast-import` writer the SVN side uses.
+
+The shape of the problem is close to Subversion's: a centralised server with global
+sequential versions (changesets rather than revisions), branches represented as
+folders under a server path (`$/Project/Main`), and branch creation recorded as a
+copy. So the mapping logic mirrors `convert/native.py`, and the output is the same
+kind of mirror — `refs/remotes/tfvc/*` with a trailer per commit recording which
+changeset it came from — which is what lets the export, push, verify and sync stages
+work unchanged.
+
+Where TFVC differs, and why each matters:
+
+* **`changeType` is a flags enum.** `rename, edit` is one change that both moves a
+  file and alters its bytes. Handling only the rename leaves the new path holding
+  the old content.
+* **Branch creation enumerates every file, and that list is the authority.** TFVC
+  emits a `branch` change per item, each carrying the item's own version. It is
+  tempting to skip them and copy the source branch's tree wholesale with
+  fast-import's `ls`, the way SVN directory copies are resolved — but a TFVC branch
+  can be cut from *any* version, not just the source's tip, so the copied tree is
+  frequently the wrong one. Worse, a branch cut from an already-wrong branch inherits
+  and compounds the error. The per-file records are used instead; deduplicating on
+  the content hash keeps that cheap.
+* **Content arrives over HTTP, one item at a time.** Item content at a changeset is
+  immutable and frequently duplicated across branches, so blobs are cached by
+  content hash and written to the stream once.
+"""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from threading import Event
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+from ..convert.fastimport import FastImport
+from ..errors import ConversionError
+from ..logging_setup import get_logger
+from ..svn.authors import AuthorMap
+from .client import Change, Changeset, TfvcClient
+
+log = get_logger("tfvc.convert")
+
+TFVC_PREFIX = "tfvc/"
+MAIN_BRANCH_KEY = "\x00main"
+
+# Folder names that conventionally hold branches rather than being one.
+BRANCH_CONTAINERS = ("branches", "branch", "dev", "development", "releases", "release",
+                     "features", "feature")
+# Folder names that conventionally *are* the mainline.
+MAIN_NAMES = ("main", "trunk", "master", "mainline", "current")
+
+
+@dataclass
+class TfvcLayout:
+    """Which server paths are branches."""
+
+    project_root: str                       # "$/DemoProject"
+    branch_roots: List[str] = field(default_factory=list)   # full server paths
+    main_root: str = ""
+    detected_from: str = ""
+    # True when no branch looked like a mainline and one was picked arbitrarily.
+    # Publishing an arbitrary branch as `main` is not something to do quietly.
+    main_is_a_guess: bool = False
+
+    # -- DetectedLayout-compatible surface ------------------------------------
+    # The exporter reads `layout.tags`/`.trunk`/`.branches` without caring which
+    # source produced the mirror, so those names are answered here too.
+
+    @property
+    def tags(self) -> List[str]:
+        """TFVC has no tags. Labels are the nearest thing and are not migrated."""
+        return []
+
+    @property
+    def trunk(self) -> str:
+        return self.main_root
+
+    @property
+    def branches(self) -> List[str]:
+        return [r for r in self.branch_roots if r != self.main_root]
+
+    def to_dict(self) -> dict:
+        return {"project_root": self.project_root, "main_root": self.main_root,
+                "branch_roots": self.branch_roots, "detected_from": self.detected_from,
+                "main_is_a_guess": self.main_is_a_guess}
+
+
+@dataclass
+class TfvcResult:
+    changesets: int = 0
+    commits: int = 0
+    branches: Dict[str, str] = field(default_factory=dict)
+    skipped_paths: int = 0
+    unresolved_branches: List[str] = field(default_factory=list)
+    bytes_downloaded: int = 0
+    blobs_written: int = 0
+    blobs_deduplicated: int = 0
+    last_changeset: int = 0
+    duration: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "source": "tfvc",
+            "changesets": self.changesets,
+            "commits": self.commits,
+            "branch_count": len(self.branches),
+            "branches": sorted(self.branches),
+            "skipped_paths": self.skipped_paths,
+            "unresolved_branches": self.unresolved_branches[:50],
+            "bytes_downloaded": self.bytes_downloaded,
+            "blobs_written": self.blobs_written,
+            "blobs_deduplicated": self.blobs_deduplicated,
+            "last_changeset": self.last_changeset,
+            "duration": round(self.duration, 1),
+        }
+
+
+def detect_layout(project_root: str, branch_paths: Sequence[str],
+                  sample_paths: Sequence[str] = (),
+                  explicitly_configured: bool = False) -> TfvcLayout:
+    """Work out the branch roots for a team project.
+
+    TFVC's branch API only knows about folders explicitly *converted to branches*.
+    Plenty of real projects branch by copying a folder and never convert it, so the
+    API is treated as a strong hint and path conventions fill the gaps.
+    """
+    root = project_root.rstrip("/")
+    layout = TfvcLayout(project_root=root)
+
+    known = [p.rstrip("/") for p in branch_paths if p and p.rstrip("/") != root]
+    explicit_main = ""
+    if known:
+        # An explicitly configured list is an instruction, not a discovery: the
+        # first entry is taken as the mainline so the operator can decide.
+        explicit_main = known[0] if explicitly_configured else ""
+        layout.branch_roots = sorted(set(known))
+        layout.detected_from = ("configured branch roots" if explicitly_configured
+                                else "server branch definitions")
+    else:
+        # Fall back to the folders directly under the project root.
+        candidates = set()
+        prefix = root + "/"
+        for path in sample_paths:
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix):].split("/")
+            if not rest or not rest[0]:
+                continue
+            first = rest[0]
+            if first.lower() in BRANCH_CONTAINERS and len(rest) > 1:
+                candidates.add(f"{root}/{first}/{rest[1]}")
+            else:
+                candidates.add(f"{root}/{first}")
+        layout.branch_roots = sorted(candidates)
+        layout.detected_from = "path conventions (no server branch definitions found)"
+
+    if explicit_main:
+        layout.main_root = explicit_main
+        return layout
+
+    for candidate in layout.branch_roots:
+        if candidate.rsplit("/", 1)[-1].lower() in MAIN_NAMES:
+            layout.main_root = candidate
+            return layout
+
+    if layout.branch_roots:
+        # Nothing is called Main/Trunk/Master. Pick one so the run can proceed, but
+        # record that it was a guess so the analysis can say so loudly.
+        layout.main_root = layout.branch_roots[0]
+        layout.main_is_a_guess = True
+    return layout
+
+
+class TfvcMapper:
+    """Maps a TFVC server path onto (branch, path-within-branch)."""
+
+    def __init__(self, layout: TfvcLayout, default_branch: str = "main") -> None:
+        self.layout = layout
+        self.default_branch = default_branch
+        # Longest first, so `$/P/Branches/X` wins over `$/P/Branches`.
+        self.roots = sorted(layout.branch_roots, key=len, reverse=True)
+
+    def classify(self, path: str) -> Optional[Tuple[str, str, bool]]:
+        """`(branch_key, subpath, is_branch_root)` or None if outside the layout."""
+        clean = path.rstrip("/")
+        for root in self.roots:
+            if clean == root:
+                return self.key_for(root), "", True
+            if clean.startswith(root + "/"):
+                return self.key_for(root), clean[len(root) + 1:], False
+        return None
+
+    def key_for(self, root: str) -> str:
+        if root == self.layout.main_root:
+            return MAIN_BRANCH_KEY
+        return root.rsplit("/", 1)[-1]
+
+    def branch_name(self, key: str) -> str:
+        return self.default_branch if key == MAIN_BRANCH_KEY else key
+
+    def ref(self, key: str) -> str:
+        return f"refs/remotes/{TFVC_PREFIX}{self.branch_name(key)}"
+
+
+class TfvcConverter:
+    """Streams a TFVC history into a Git repository."""
+
+    def __init__(
+        self,
+        client: TfvcClient,
+        git_exe: str,
+        repo_dir: Path,
+        layout: TfvcLayout,
+        authors: AuthorMap,
+        default_branch: str = "main",
+        default_domain: str = "localhost",
+        env: Optional[Dict[str, str]] = None,
+        cancel: Optional[Event] = None,
+        collection_url: str = "",
+    ) -> None:
+        self.client = client
+        self.git_exe = git_exe
+        self.repo_dir = Path(repo_dir)
+        self.mapper = TfvcMapper(layout, default_branch)
+        self.authors = authors
+        self.default_domain = default_domain
+        self.env = env
+        self.cancel = cancel
+        self.collection_url = collection_url.rstrip("/")
+
+        self.heads: Dict[str, object] = {}                      # key -> mark or sha
+        self.history: Dict[str, List[Tuple[int, object]]] = {}   # key -> [(cs, ref)]
+        # content md5 -> blob mark, so identical bytes are written to the stream once
+        # however many branches or paths carry them.
+        self._blob_marks: Dict[str, int] = {}
+        self.result = TfvcResult()
+
+    # -- identity -------------------------------------------------------------
+
+    def _identity(self, changeset: Changeset) -> Tuple[str, str]:
+        key = changeset.author.key
+        identity = self.authors.get(key)
+        if identity:
+            return identity.name, identity.email
+        # Fall back to the display name, then a synthesised address.
+        from ..svn.authors import normalise_username, humanise
+        base = normalise_username(key) or "tfs"
+        name = changeset.author.display_name or humanise(base)
+        return name, f"{base.lower()}@{self.default_domain}"
+
+    # -- copy resolution ------------------------------------------------------
+
+    def _head_at(self, key: str, changeset_id: int):
+        entries = self.history.get(key)
+        if not entries:
+            return None
+        best = None
+        for cs_id, ref in entries:
+            if cs_id <= changeset_id:
+                best = ref
+            else:
+                break
+        return best
+
+    @staticmethod
+    def _ref_of(mark_or_sha) -> str:
+        return f":{mark_or_sha}" if isinstance(mark_or_sha, int) else str(mark_or_sha)
+
+    # -- conversion -----------------------------------------------------------
+
+    def convert(
+        self,
+        changesets: Sequence[Changeset],
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> TfvcResult:
+        started = time.time()
+        total = len(changesets)
+        last_report = [0.0]
+
+        with FastImport(self.git_exe, self.repo_dir, env=self.env) as importer:
+            self.seed_from_repository(importer)
+            for index, changeset in enumerate(changesets, 1):
+                if self.cancel is not None and self.cancel.is_set():
+                    raise ConversionError("conversion cancelled")
+                self._convert_changeset(importer, changeset)
+                self.result.changesets += 1
+                self.result.last_changeset = changeset.id
+
+                now = time.time()
+                if on_progress and (now - last_report[0] > 0.5 or index == total):
+                    last_report[0] = now
+                    on_progress(index / total if total else 1.0,
+                                f"changeset {changeset.id} ({index:,} of {total:,})")
+
+        self.result.duration = time.time() - started
+        log.info("TFVC conversion: %d changesets -> %d commits across %d branch(es) in %.0fs "
+                 "(%d blobs, %d deduplicated)",
+                 self.result.changesets, self.result.commits, len(self.result.branches),
+                 self.result.duration, self.result.blobs_written,
+                 self.result.blobs_deduplicated)
+        return self.result
+
+    def seed_from_repository(self, _importer: FastImport) -> None:
+        """Adopt refs already present so an incremental run continues them."""
+        # Populated by the mirror wrapper before conversion; kept as a hook so the
+        # incremental path mirrors the Subversion engine's.
+        return
+
+    def _convert_changeset(self, importer: FastImport, changeset: Changeset) -> None:
+        try:
+            changes = self.client.changeset_changes(changeset.id)
+        except Exception as exc:
+            raise ConversionError(
+                f"could not read the changes in changeset {changeset.id}: {exc}",
+                "The conversion stops rather than silently skipping a changeset, "
+                "which would leave a hole in the migrated history.",
+            ) from exc
+
+        grouped: Dict[str, List[Change]] = {}
+        for change in changes:
+            placed = self.mapper.classify(change.path)
+            if placed is None:
+                self.result.skipped_paths += 1
+                continue
+            grouped.setdefault(placed[0], []).append(change)
+
+        for key, items in grouped.items():
+            self._commit(importer, changeset, key, items)
+
+    def _commit(self, importer: FastImport, changeset: Changeset, key: str,
+                changes: List[Change]) -> None:
+        # A folder-level `branch` change supplies the new branch's *parent*, and
+        # nothing else.
+        #
+        # It used to supply the content too: the source commit's tree was copied
+        # wholesale with `ls` and the per-file `branch` records TFVC emits were
+        # skipped, on the reasoning that Git already held those bytes. That is wrong.
+        # `_branch_copy_source` resolves the source to whatever the *converted* source
+        # branch's head happens to be, which is not necessarily the version TFVC
+        # branched from — and a branch cut from an already-stale branch inherits the
+        # error. It produced branches silently short by a few hundred files, worst on
+        # branches cut from branches.
+        #
+        # TFVC already states exactly what the branch contains: one record per file,
+        # carrying that file's item version. That is the authority now. The cost is
+        # metadata rather than bandwidth, because `_blob_for` dedupes on the content
+        # hash *before* fetching, and a branch copy is by definition content already
+        # seen.
+        branch_copy = self._branch_copy_source(changes)
+
+        payload: List[Tuple[Change, Optional[int]]] = []
+        for change in changes:
+            # Folders carry no content, but a folder that is deleted or renamed moves
+            # its whole subtree and must be replayed. Skipping every folder change
+            # meant a deleted folder's files simply stayed.
+            if change.is_folder and not (change.is_delete or change.is_rename):
+                continue
+            mark = None
+            if change.touches_content and not change.is_delete:
+                mark = self._blob_for(importer, change)
+            payload.append((change, mark))
+
+        if not payload and branch_copy is None:
+            return  # nothing representable in Git (locks, property-only changes)
+
+        name, email = self._identity(changeset)
+        when = changeset.git_date()
+        message = self._message(changeset, key)
+
+        parent_ref = self.heads.get(key)
+        parent = self._ref_of(parent_ref) if parent_ref is not None else None
+        if parent is None and branch_copy is not None:
+            parent = branch_copy[1]
+
+        # A rename with no edit keeps its bytes, so TFVC sends no content flag and
+        # `_blob_for` produces nothing. Deleting the old path and writing nothing at
+        # the new one made the file disappear outright. Git models a rename as the
+        # same blob at a new path, so take it from the parent tree - exact, and no
+        # download.
+        renames: Dict[str, Tuple[str, str]] = {}
+        if parent is not None:
+            for change, blob_mark in payload:
+                if blob_mark is not None or change.is_delete or not change.is_rename:
+                    continue
+                old = self.mapper.classify(change.source_path) if change.source_path else None
+                if old is None or not old[1]:
+                    continue
+                found = importer.ls(parent, old[1])
+                if not found.missing:
+                    renames[change.path] = (found.mode, found.dataref)
+
+        mark = importer.begin_commit(
+            ref=self.mapper.ref(key),
+            author=(name, email, when),
+            committer=(name, email, when),
+            message=message,
+            parent=parent,
+        )
+
+        # Re-branching over a branch that already holds content replaces its whole
+        # tree, so start from empty and let the per-file records below rebuild it.
+        # Only when the branch *root* itself was branched: branching a subfolder into
+        # an existing branch must not wipe the rest of it.
+        if branch_copy is not None and parent is not None and branch_copy[0]:
+            importer.deleteall()
+
+        for change, blob_mark in payload:
+            self._apply(importer, change, blob_mark, renames)
+
+        importer.end_commit()
+
+        self.heads[key] = mark
+        self.history.setdefault(key, []).append((changeset.id, mark))
+        self.result.commits += 1
+        self.result.branches[self.mapper.branch_name(key)] = f":{mark}"
+
+    def _branch_copy_source(self, changes: List[Change]):
+        """`(branched_at_the_branch_root, parent_ref)` for a branch creation.
+
+        Only the ancestry comes from here. The content comes from the per-file
+        `branch` records in the changeset, which carry TFVC's own item versions — see
+        the note in `_commit` for why trusting the source branch's tree was wrong.
+        """
+        for change in changes:
+            if not (change.is_folder and change.is_branch_creation and change.source_path):
+                continue
+            source = self.mapper.classify(change.source_path)
+            if source is None:
+                continue
+            head = self._head_at(source[0], 10 ** 9)
+            if head is None:
+                continue
+            target = self.mapper.classify(change.path)
+            return bool(target and target[2]), self._ref_of(head)
+        return None
+
+    def _blob_for(self, importer: FastImport, change: Change) -> Optional[int]:
+        """Write the item's content as a blob, reusing one already in the stream."""
+        digest = change.md5
+        if digest and digest in self._blob_marks:
+            self.result.blobs_deduplicated += 1
+            return self._blob_marks[digest]
+
+        content = self.client.item_content(
+            change.path, change.version,
+            expected_md5=digest, expected_size=change.size if change.size else -1,
+        )
+        self.result.bytes_downloaded += len(content)
+        mark = importer.blob(content)
+        self.result.blobs_written += 1
+        if digest:
+            self._blob_marks[digest] = mark
+        return mark
+
+    def _apply(self, importer: FastImport, change: Change,
+               blob_mark: Optional[int],
+               renames: Optional[Dict[str, Tuple[str, str]]] = None) -> None:
+        placed = self.mapper.classify(change.path)
+        if placed is None:
+            return
+        _key, subpath, is_root = placed
+        if is_root or not subpath:
+            return
+
+        if change.is_delete:
+            importer.filedelete(subpath)
+            return
+
+        # A rename moves the old path away first. When the change also carries an
+        # edit, the new content is written below - handling only the move would
+        # leave the renamed file holding its previous bytes.
+        if change.is_rename and change.source_path:
+            old = self.mapper.classify(change.source_path)
+            if old is not None and old[1]:
+                importer.filedelete(old[1])
+
+        if blob_mark is not None:
+            mode = "120000" if change.is_symlink else "100644"
+            importer.filemodify(mode, f":{blob_mark}", subpath)
+        elif renames and change.path in renames:
+            # Pure rename: the same object, moved. The mode comes from the parent tree
+            # so a renamed *folder* moves its whole subtree rather than being written
+            # as a file. Without this the new path is never written at all and the
+            # content is simply lost.
+            old_mode, dataref = renames[change.path]
+            importer.filemodify(old_mode, dataref, subpath)
+
+    def _message(self, changeset: Changeset, key: str) -> bytes:
+        text = (changeset.message or "").rstrip()
+        body = text.encode("utf-8", "surrogateescape") if text else b""
+        # The same role `git-svn-id` plays on the Subversion side: it records which
+        # changeset a commit came from, which is what makes incremental sync work.
+        location = f"{self.collection_url}{self.mapper.layout.project_root}" \
+            if self.collection_url else self.mapper.layout.project_root
+        trailer = f"tfs-changeset-id: {location}@{changeset.id}".encode("utf-8")
+        message = (body + b"\n\n" + trailer) if body else trailer
+        return message + b"\n"

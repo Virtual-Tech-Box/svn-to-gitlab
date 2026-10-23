@@ -21,6 +21,12 @@ from .client import SvnClient, SvnEntry, url_join
 
 log = get_logger("analyze")
 
+# Bucket label for files with no extension. Deliberately not "": the manifest is
+# JSON, and Windows PowerShell's ConvertFrom-Json refuses to build an object with an
+# empty property name — which made the report unreadable on the very platform the
+# tool is designed to run on.
+NO_EXTENSION = "(no extension)"
+
 # Directory names that in practice mean trunk / branches / tags.
 TRUNK_NAMES = ("trunk", "TRUNK", "Trunk", "main", "master", "head", "MAIN")
 BRANCH_NAMES = ("branches", "BRANCHES", "Branches", "branch", "brances", "dev", "development")
@@ -334,7 +340,7 @@ def collect_tree_stats(
 
     for entry in files:
         total += entry.size
-        ext = entry.path.rsplit(".", 1)[-1].lower() if "." in entry.path.rsplit("/", 1)[-1] else ""
+        ext = entry.path.rsplit(".", 1)[-1].lower() if "." in entry.path.rsplit("/", 1)[-1] else NO_EXTENSION
         ext_sizes[ext] += entry.size
         if entry.size >= lfs_threshold_bytes or (ext and ext in lfs_ext):
             lfs_count += 1
