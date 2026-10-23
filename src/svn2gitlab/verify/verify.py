@@ -31,6 +31,7 @@ from threading import Event
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import VerifyMode
+from ..convert.fastimport import portable_path
 from ..convert.git import Git
 from ..convert.lfs import parse_pointer
 from ..errors import VerificationError
@@ -350,7 +351,8 @@ class Verifier:
             for name in files:
                 full = Path(root) / name
                 rel = full.relative_to(export_root).as_posix()
-                svn_files[rel] = full
+                # The converter renames paths Git cannot store; compare like for like.
+                svn_files[portable_path(rel)] = full
 
         git_paths = set(tree)
         svn_paths = set(svn_files)

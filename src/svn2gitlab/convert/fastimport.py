@@ -238,6 +238,46 @@ class FastImport:
             self._proc.stdin.flush()
 
 
+# Characters Git for Windows refuses anywhere in a path (core.protectNTFS).
+_WINDOWS_INVALID_CHARS = set('<>:"|?*\\') | {chr(c) for c in range(32)}
+_WINDOWS_RESERVED_NAMES = (
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
+
+def portable_path(path: str, windows: bool = IS_WINDOWS) -> str:
+    """Rewrite `path` into a form `git fast-import` on this host will accept.
+
+    Subversion stores almost any name, Git does not. Two shapes turn up in real
+    repositories and make fast-import die with `fatal: invalid path`:
+
+    * a `.git` directory committed into Subversion, refused on every platform;
+    * names Windows cannot represent - most often a URL pasted into a TortoiseSVN
+      "copy to" box, which creates `branches/https:/server/svn/...` - refused by Git
+      for Windows only.
+
+    Each offending character is percent-encoded, as git-svn does for ref names, so
+    the content survives under a recognisable name and a later copy from, or
+    deletion of, the original path maps to the same place. Paths Git accepts are
+    returned unchanged.
+    """
+    parts = path.split("/")
+    for index, part in enumerate(parts):
+        if part.rstrip(". ").lower() in (".git", "git~1"):
+            part = "%2E" + part[1:] if part.startswith(".") else "%67" + part[1:]
+        if windows:
+            part = "".join(f"%{ord(c):02X}" if c in _WINDOWS_INVALID_CHARS else c
+                           for c in part)
+            if part.endswith((".", " ")) and part not in (".", ".."):
+                part = part[:-1] + f"%{ord(part[-1]):02X}"
+            if part.split(".", 1)[0].rstrip(" ").upper() in _WINDOWS_RESERVED_NAMES:
+                part = f"%{ord(part[0]):02X}" + part[1:]
+        parts[index] = part
+    return "/".join(parts)
+
+
 def _quote_path(path: str) -> bytes:
     """Encode a path for fast-import, quoting only when required.
 

@@ -20,11 +20,14 @@ Fidelity notes, because they are the whole point:
 * directory copies (branch and tag creation) are resolved through fast-import's `ls`
   so a branch of 30,000 files costs one line, not 30,000;
 * a copy whose source lies outside the migrated subtree degrades to an explicit
-  add of whatever the dump does carry, and is reported rather than silently dropped.
+  add of whatever the dump does carry, and is reported rather than silently dropped;
+* a path Git cannot store (see `portable_path`) is renamed, consistently for its
+  copies and deletions too, and reported.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,8 +41,9 @@ from ..svn.analyze import DetectedLayout
 from ..svn.authors import AuthorMap, Identity
 from .dumpstream import (ACTION_ADD, ACTION_CHANGE, ACTION_DELETE, ACTION_REPLACE,
                          DumpReader, Node, Revision, svn_date_to_git)
-from .fastimport import FastImport
-from .mirrorfmt import SVN_PREFIX
+from ..procs import IS_WINDOWS
+from .fastimport import FastImport, portable_path
+from .mirrorfmt import SVN_PREFIX, escape_ref_name, unescape_ref_name
 
 log = get_logger("native")
 
@@ -63,8 +67,11 @@ class NativeResult:
     branches: Dict[str, str] = field(default_factory=dict)     # name -> mark
     tags: Dict[str, str] = field(default_factory=dict)
     skipped_paths: int = 0
+    ignored_paths: int = 0
     deleted_refs: List[str] = field(default_factory=list)
     unresolved_copies: List[str] = field(default_factory=list)
+    # "svn path -> git path" for each directory or file renamed by `portable_path`.
+    renamed_paths: List[str] = field(default_factory=list)
     last_revision: int = 0
     duration: float = 0.0
 
@@ -76,8 +83,10 @@ class NativeResult:
             "branch_count": len(self.branches),
             "tag_count": len(self.tags),
             "skipped_paths": self.skipped_paths,
+            "ignored_paths": self.ignored_paths,
             "deleted_refs": self.deleted_refs,
             "unresolved_copies": self.unresolved_copies[:50],
+            "renamed_paths": self.renamed_paths[:50],
             "last_revision": self.last_revision,
             "duration": round(self.duration, 1),
         }
@@ -166,6 +175,7 @@ class NativeConverter:
         svn_url: str = "",
         uuid: str = "",
         emit_svn_id: bool = True,
+        ignore_paths: Optional[str] = None,
     ) -> None:
         self.git_exe = git_exe
         self.repo_dir = Path(repo_dir)
@@ -178,6 +188,10 @@ class NativeConverter:
         self.svn_url = svn_url
         self.uuid = uuid
         self.emit_svn_id = bool(emit_svn_id and svn_url and uuid)
+        # `source.layout.ignore_paths`, matched against repository-relative paths.
+        self.ignore = re.compile(ignore_paths) if ignore_paths else None
+        # Which host's path rules to apply; Git for Windows is the stricter one.
+        self.windows = IS_WINDOWS
         self.tags_path = (layout.tags[0].rstrip("/*").strip("/") if layout.tags else "tags")
         # svn:ignore properties, so a native conversion can still generate .gitignore.
         self.ignores: Dict[str, str] = {}
@@ -190,6 +204,7 @@ class NativeConverter:
         self.history: Dict[str, List[Tuple[int, int]]] = {}
         # Refs whose Subversion directory was deleted before HEAD.
         self.deleted_refs: set = set()
+        self._renames_seen: set = set()
         self.result = NativeResult()
 
     # -- identity ------------------------------------------------------------
@@ -213,8 +228,38 @@ class NativeConverter:
         if key == TRUNK_BRANCH:
             return f"refs/remotes/{SVN_PREFIX}trunk"
         if key.startswith("tag:"):
-            return f"refs/remotes/{SVN_PREFIX}{self.tags_path}/{key[4:]}"
-        return f"refs/remotes/{SVN_PREFIX}{key}"
+            return f"refs/remotes/{SVN_PREFIX}{self.tags_path}/{escape_ref_name(key[4:])}"
+        return f"refs/remotes/{SVN_PREFIX}{escape_ref_name(key)}"
+
+    # -- path mapping --------------------------------------------------------
+
+    def _classify(self, svn_path: str, record: bool = False) -> PathClass:
+        """Classify `svn_path`, with its in-branch path made storable by Git.
+
+        Copy sources go through here too, so a copy *from* a renamed path finds the
+        content where it was actually written.
+        """
+        cls = self.mapper.classify(svn_path)
+        if cls.kind == "outside" or not cls.subpath:
+            return cls
+        portable = portable_path(cls.subpath, windows=self.windows)
+        if portable != cls.subpath:
+            if record:
+                self._record_rename(svn_path.strip("/"), cls.subpath, portable)
+            cls.subpath = portable
+        return cls
+
+    def _record_rename(self, svn_path: str, subpath: str, portable: str) -> None:
+        """Report the outermost renamed component once, not every file beneath it."""
+        old_parts, new_parts = subpath.split("/"), portable.split("/")
+        depth = next(i for i, (a, b) in enumerate(zip(old_parts, new_parts)) if a != b) + 1
+        prefix = svn_path[:len(svn_path) - len(subpath)]
+        entry = (f"{prefix}{'/'.join(old_parts[:depth])} -> "
+                 f"{'/'.join(new_parts[:depth])}")
+        if entry not in self._renames_seen:
+            self._renames_seen.add(entry)
+            self.result.renamed_paths.append(entry)
+            log.warning("renamed a path Git cannot store: %s", entry)
 
     # -- copy resolution -----------------------------------------------------
 
@@ -234,7 +279,7 @@ class NativeConverter:
     def _resolve_copy(self, importer: FastImport, node: Node,
                       destination: PathClass) -> Optional[Tuple[str, str]]:
         """Return `(mode, dataref)` for a copied path, or None if unresolvable."""
-        source = self.mapper.classify(node.copyfrom_path or "")
+        source = self._classify(node.copyfrom_path or "")
         if source.kind == "outside":
             return None
         source_key = self.mapper.ref_for(source)
@@ -259,11 +304,11 @@ class NativeConverter:
         tags_prefix = f"{prefix}{self.tags_path}/"
         for ref in git.list_refs(prefix):
             if ref.name.startswith(tags_prefix):
-                key = f"tag:{ref.name[len(tags_prefix):]}"
+                key = f"tag:{unescape_ref_name(ref.name[len(tags_prefix):])}"
             elif ref.name == f"{prefix}trunk":
                 key = TRUNK_BRANCH
             else:
-                key = ref.name[len(prefix):]
+                key = unescape_ref_name(ref.name[len(prefix):])
             meta = git.commit_meta(ref.sha)
             revision = extract_svn_revision(meta.get("message", "")) or 0
             self.heads[key] = ref.sha           # a sha works wherever a mark does
@@ -313,7 +358,10 @@ class NativeConverter:
         # touching trunk and a branch becomes one commit on each, as git-svn does.
         grouped: Dict[str, List[Tuple[Node, PathClass]]] = {}
         for node in revision.nodes:
-            cls = self.mapper.classify(node.path)
+            if self.ignore and self.ignore.search(node.path.strip("/")):
+                self.result.ignored_paths += 1
+                continue
+            cls = self._classify(node.path, record=True)
             if cls.kind == "outside":
                 self.result.skipped_paths += 1
                 continue

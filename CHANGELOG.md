@@ -9,6 +9,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **An SVN path Git cannot store crashed the conversion with `fatal: invalid path`.**
+  The usual cause is a URL pasted into a TortoiseSVN "copy to" box, which leaves a
+  directory literally named `https:` that Git for Windows refuses; a `.git` folder
+  committed into Subversion fails on every platform. Such paths are now renamed by
+  percent-encoding the offending character (`https:` → `https%3A`), applied to copy
+  sources as well, so a later clean-up move out of the bad path keeps its content.
+  Renames are listed in the convert stage's `renamed_paths`. A branch or tag with
+  such a name gets a valid ref by git-svn's reversible escaping.
+
+- **`source.layout.ignore_paths` was accepted but never applied.** The native engine
+  now leaves out every node whose repository-relative path matches it.
+
 - **A TFVC rename with no edit deleted the file.** `rename` carries no content flag,
   so nothing was written at the new path while the old one was removed — the file
   vanished. Only `rename, edit` was ever tested, where the edit supplied the bytes and

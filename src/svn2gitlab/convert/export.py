@@ -29,7 +29,7 @@ from ..svn.analyze import sanitize_ref_name
 from ..tools import ToolSet
 from . import fastfilter, lfs as lfs_mod
 from .git import Git
-from .mirrorfmt import SVN_FORMAT, SVN_PREFIX
+from .mirrorfmt import SVN_FORMAT, SVN_PREFIX, unescape_ref_name
 
 log = get_logger("export")
 
@@ -216,8 +216,12 @@ class Exporter:
         )
 
     def _src_refs(self) -> Dict[str, str]:
+        """Source branch name -> sha, named as Subversion names the directory."""
         prefix = f"{SRC_NAMESPACE}/"
-        return {ref.name[len(prefix):]: ref.sha
+        # The SVN mirror escapes names a ref cannot hold (`escape_ref_name`); undo it
+        # so naming and the live-branch check see the real directory name.
+        unescape = unescape_ref_name if self.fmt is SVN_FORMAT else (lambda n: n)
+        return {unescape(ref.name[len(prefix):]): ref.sha
                 for ref in self.git.list_refs(SRC_NAMESPACE)
                 if ref.name.startswith(prefix) and not ref.name.endswith("@")}
 

@@ -183,6 +183,7 @@ class NativeMirror:
             default_domain="localhost",
             svn_url=self.source.url or self.source_url,
             uuid=self.uuid,
+            ignore_paths=self.source.layout.ignore_paths,
         )
         # Resuming: seed the converter with the refs already present so new commits
         # attach to existing history instead of starting fresh roots.
@@ -241,6 +242,8 @@ class NativeMirror:
             revisions_fetched=native_result.revisions,
             last_revision=native_result.last_revision,
             duration=native_result.duration,
+            renamed_paths=list(native_result.renamed_paths),
+            ignored_paths=native_result.ignored_paths,
         )
         result.refs = self.remote_refs()
         result.head_sha = self.git.rev_parse(self.trunk_ref) or ""
