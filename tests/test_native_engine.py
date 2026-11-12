@@ -421,13 +421,13 @@ def _dump(*revisions) -> bytes:
     return b"".join(out)
 
 
-def _convert_dump(tmp_path, data, layout, windows, ignore_paths=None):
+def _convert_dump(tmp_path, data, layout, windows, ignore_paths=None, root=""):
     target = tmp_path / "native"
     subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
     converter = NativeConverter(
         git_exe="git", repo_dir=target, layout=layout,
         convert=ConvertConfig(default_branch="main"), authors=author_map(),
-        emit_svn_id=False, ignore_paths=ignore_paths,
+        emit_svn_id=False, ignore_paths=ignore_paths, root=root,
     )
     converter.windows = windows
     result = converter.convert_stream(io.BytesIO(data))
@@ -501,3 +501,139 @@ def test_a_branch_named_like_a_url_gets_a_valid_ref(tmp_path):
     target, result = _convert_dump(tmp_path, data, layout, windows=False)
     assert "refs/remotes/svn/https%3A" in git(target, "for-each-ref", "--format=%(refname)")
     assert "https:" in result.branches
+
+
+# --------------------------------------------------------------------------- #
+# Migrating one folder of a shared repository
+# --------------------------------------------------------------------------- #
+
+def _tree(target, ref="refs/remotes/svn/trunk"):
+    return git(target, "ls-tree", "-r", "--name-only", ref).splitlines()
+
+
+def test_the_layout_is_relative_to_the_migrated_folder():
+    mapper = LayoutMapper(FLAT, "main", root="cms/main")
+    assert mapper.classify("cms/main/src/App.java").subpath == "src/App.java"
+    assert mapper.classify("cms/main").is_root
+    assert mapper.classify("cms/mainline/x").kind == "outside"
+    assert mapper.classify("ITFS/Portal/.git/HEAD").kind == "outside"
+
+
+def test_only_the_migrated_folder_is_published(tmp_path):
+    """Other projects - and the names Git refuses in them - stay unpublished."""
+    data = _dump(
+        [("ITFS", "dir", "add", {}), ("ITFS/.git", "dir", "add", {}),
+         ("ITFS/.git/HEAD", "file", "add", {"text": b"ref\n"}),
+         ("TReDS", "dir", "add", {}), ("TReDS/https:", "dir", "add", {}),
+         ("TReDS/https:/a.txt", "file", "add", {"text": b"a\n"}),
+         ("cms", "dir", "add", {}), ("cms/main", "dir", "add", {}),
+         ("cms/main/App.java", "file", "add", {"text": b"class App {}\n"})],
+    )
+    target, result = _convert_dump(tmp_path, data, FLAT, windows=True, root="cms/main")
+    assert _tree(target) == ["App.java"]
+    published = git(target, "for-each-ref", "--format=%(refname)", "refs/remotes/")
+    assert published.splitlines() == ["refs/remotes/svn/trunk"]
+    assert result.renamed_paths == []        # outside renames are not reported
+
+
+def test_a_folder_moved_into_place_keeps_its_files(tmp_path):
+    """`svn mv Old cms` with the folder set to cms/main: the files come along."""
+    data = _dump(
+        [("Old", "dir", "add", {}), ("Old/main", "dir", "add", {}),
+         ("Old/main/a.txt", "file", "add", {"text": b"from old\n"})],
+        [("cms", "dir", "add", {"copyfrom": ("Old", 1)}),
+         ("Old", "", "delete", {})],
+    )
+    target, result = _convert_dump(tmp_path, data, FLAT, windows=False, root="cms/main")
+    assert _tree(target) == ["a.txt"]
+    assert git(target, "show", "refs/remotes/svn/trunk:a.txt") == "from old"
+    assert not result.unresolved_copies
+
+
+def test_a_file_copied_in_from_another_project_keeps_its_content(tmp_path):
+    data = _dump(
+        [("ITFS", "dir", "add", {}),
+         ("ITFS/readme.txt", "file", "add", {"text": b"shared readme\n"}),
+         ("cms", "dir", "add", {}), ("cms/main", "dir", "add", {}),
+         ("cms/main/App.java", "file", "add", {"text": b"class App {}\n"})],
+        [("cms/main/readme.txt", "file", "add", {"copyfrom": ("ITFS/readme.txt", 1)})],
+    )
+    target, result = _convert_dump(tmp_path, data, FLAT, windows=False, root="cms/main")
+    assert _tree(target) == ["App.java", "readme.txt"]
+    assert git(target, "show", "refs/remotes/svn/trunk:readme.txt") == "shared readme"
+    assert not result.unresolved_copies
+
+
+def test_paths_differing_only_by_an_unsafe_character_stay_apart(tmp_path):
+    data = _dump(
+        [("p", "dir", "add", {}), ("p/https:", "dir", "add", {}),
+         ("p/https:/a.txt", "file", "add", {"text": b"colon\n"}),
+         ("p/https_", "dir", "add", {}),
+         ("p/https_/a.txt", "file", "add", {"text": b"underscore\n"})],
+    )
+    target, _result = _convert_dump(tmp_path, data, FLAT, windows=True)
+    assert git(target, "show", "refs/remotes/svn/trunk:p/https%3A/a.txt") == "colon"
+    assert git(target, "show", "refs/remotes/svn/trunk:p/https_/a.txt") == "underscore"
+
+
+def test_branches_differing_only_by_escaping_stay_apart(tmp_path):
+    layout = DetectedLayout(mode=LayoutMode.STANDARD, trunk="trunk",
+                            branches=["branches"], tags=["tags"])
+    data = _dump(
+        [("trunk", "dir", "add", {}), ("trunk/f", "file", "add", {"text": b"f\n"}),
+         ("branches", "dir", "add", {})],
+        [("branches/release 1", "dir", "add", {"copyfrom": ("trunk", 1)}),
+         ("branches/release 1/one", "file", "add", {"text": b"1\n"})],
+        [("branches/release-1", "dir", "add", {"copyfrom": ("trunk", 1)}),
+         ("branches/release-1/dash", "file", "add", {"text": b"2\n"})],
+    )
+    target, result = _convert_dump(tmp_path, data, layout, windows=False)
+    assert _tree(target, "refs/remotes/svn/release%201") == ["f", "one"]
+    assert _tree(target, "refs/remotes/svn/release-1") == ["dash", "f"]
+    assert sorted(result.branches) == ["main", "release 1", "release-1"]
+
+
+def test_an_unfollowable_copy_names_its_revision(tmp_path):
+    layout = DetectedLayout(mode=LayoutMode.STANDARD, trunk="trunk",
+                            branches=["branches"], tags=["tags"])
+    data = _dump(
+        [("trunk", "dir", "add", {}), ("vendor", "dir", "add", {}),
+         ("vendor/x.txt", "file", "add", {"text": b"x\n"})],
+        [("trunk/x.txt", "file", "add", {"copyfrom": ("vendor/x.txt", 1)})],
+    )
+    _target, result = _convert_dump(tmp_path, data, layout, windows=False)
+    assert result.unresolved_copies == ["r2: trunk/x.txt <- vendor/x.txt@1"]
+
+
+def test_a_fast_import_failure_reports_git_s_own_reason(tmp_path):
+    """Not `[Errno 22] Invalid argument`, and not "resolving a copy"."""
+    from svn2gitlab.convert.fastimport import FastImport
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    with pytest.raises(ConversionError) as caught:
+        with FastImport("git", tmp_path) as importer:
+            blob = importer.blob(b"x")
+            importer.begin_commit("refs/heads/main", ("a", "a@x", "0 +0000"),
+                                  ("a", "a@x", "0 +0000"), b"m\n")
+            importer.filemodify("100644", f":{blob}", "lib/.git/HEAD")
+            importer.end_commit()
+            importer.ls("refs/heads/main", "lib")
+    assert "invalid path" in str(caught.value)
+
+
+@pytest.mark.parametrize("help_text,expected", [
+    ("--source-trust-server-cert-failures ARG", "--source-trust-server-cert-failures="),
+    ("--source-trust-server-cert : accept", "--source-trust-server-cert"),
+    ("--trust-server-cert : deprecated", "--trust-server-cert"),
+    ("nothing relevant", None),
+])
+def test_svnsync_is_given_a_trust_option_it_knows(monkeypatch, help_text, expected):
+    from svn2gitlab.svn import acquire
+
+    monkeypatch.setattr(acquire, "_help_text", lambda exe, sub: help_text)
+    args = acquire._trust_args("svnsync", "initialize", "source")
+    if expected is None:
+        assert args == []
+    else:
+        assert len(args) == 1 and args[0].startswith(expected)
+

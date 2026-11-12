@@ -91,6 +91,8 @@ class Finding:
 class RepoAnalysis:
     url: str = ""
     repository_root: str = ""
+    # Where `url` sits inside the repository ("" for the root); None if not recorded.
+    repository_path: Optional[str] = None
     repository_uuid: str = ""
     head_revision: int = 0
     first_revision: int = 1
@@ -127,6 +129,7 @@ class RepoAnalysis:
         return {
             "url": self.url,
             "repository_root": self.repository_root,
+            "repository_path": self.repository_path,
             "repository_uuid": self.repository_uuid,
             "head_revision": self.head_revision,
             "first_revision": self.first_revision,

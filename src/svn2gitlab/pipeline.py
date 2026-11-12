@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import unquote
 
 from .config import (AuthorPolicy, FastPath, MigrationConfig, ResolvedRepo,
                      SourceKind, VerifyMode)
@@ -313,8 +314,21 @@ class MigrationPipeline:
                 local_repo=self.local_repo_path(),
                 uuid=self.analysis.repository_uuid,
                 cancel=self.cancel,
+                root=self.repository_path(),
             )
         return self._mirror
+
+    def repository_path(self) -> str:
+        """Where the migrated URL sits inside the repository, e.g. `Project/app/main`.
+
+        The conversion reads a dump of the whole repository, so this is what keeps the
+        other projects in a shared repository out of the published history. Analyses
+        made before it was recorded fall back to asking Subversion.
+        """
+        path = self.analysis.repository_path
+        if path is None:
+            path = unquote(self.svn.info(self.source_url()).relative_path)
+        return path
 
     @property
     def exporter(self) -> Exporter:
@@ -574,6 +588,7 @@ class MigrationPipeline:
         self._progress(0.05, "reading repository information")
         info = self.svn.info(url)
         analysis.repository_root = info.repository_root
+        analysis.repository_path = unquote(info.relative_path)
         analysis.repository_uuid = info.repository_uuid
         analysis.head_revision = info.revision
 
@@ -1127,7 +1142,7 @@ def _analysis_from_dict(data: Dict[str, Any]) -> RepoAnalysis:
     from .svn.analyze import DetectedLayout, Finding, LargeFile
 
     analysis = RepoAnalysis()
-    for key in ("url", "repository_root", "repository_uuid", "head_revision", "first_revision",
+    for key in ("url", "repository_root", "repository_path", "repository_uuid", "head_revision", "first_revision",
                 "revision_count", "authors", "unmapped_authors", "first_commit", "last_commit",
                 "branch_names", "tag_names", "head_file_count", "head_size_bytes",
                 "extension_sizes", "lfs_candidate_count", "lfs_candidate_bytes", "externals",

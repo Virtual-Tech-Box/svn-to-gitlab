@@ -22,6 +22,7 @@ import re
 import shutil
 import stat
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from threading import Event
 from typing import Callable, Optional
@@ -283,7 +284,38 @@ def _mirror(source: SourceConfig, tools: ToolSet, client: SvnClient, target_dir:
     return repo, mirrored
 
 
-def _sync_auth_args(source: SourceConfig, prefix: str) -> list:
+_CERT_FAILURES = "unknown-ca,cn-mismatch,expired,not-yet-valid,other"
+
+
+@lru_cache(maxsize=None)
+def _help_text(exe: str, subcommand: str) -> str:
+    result = run([exe, "help", subcommand], check=False, timeout=60, log_command=False)
+    return result.stdout + result.stderr
+
+
+def _trust_args(exe: str, subcommand: str, prefix: str = "") -> list:
+    """The certificate-trust option this particular binary actually accepts.
+
+    The spelling differs by tool and version: svnsync names it per side
+    (`--source-trust-server-cert-failures`), svnrdump does not, and clients older
+    than 1.9 only have the blanket `--trust-server-cert`. An option the binary does
+    not know fails the whole command, so ask it rather than guess.
+    """
+    text = _help_text(exe, subcommand)
+    name = f"--{prefix}-trust-server-cert" if prefix else "--trust-server-cert"
+    if f"{name}-failures" in text:
+        return [f"{name}-failures={_CERT_FAILURES}"]
+    if name in text:
+        return [name]
+    if "--trust-server-cert" in text:
+        return ["--trust-server-cert"]
+    log.warning("%s %s offers no way to trust the server certificate; if it is "
+                "self-signed, accept it once with `svn info <url>` first", exe, subcommand)
+    return []
+
+
+def _sync_auth_args(source: SourceConfig, tools: ToolSet, subcommand: str,
+                    prefix: str) -> list:
     """svnsync needs source/target credentials named separately."""
     args = ["--non-interactive"]
     if source.username:
@@ -291,8 +323,7 @@ def _sync_auth_args(source: SourceConfig, prefix: str) -> list:
     if source.password:
         args += [f"--{prefix}-password", source.password]
     if source.trust_server_cert:
-        args.append("--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,"
-                    "not-yet-valid,other")
+        args += _trust_args(tools.svnsync.path, subcommand, prefix)
     return args
 
 
@@ -304,7 +335,7 @@ def _svnsync(source: SourceConfig, tools: ToolSet, repo: Path, remote_root: str,
     if not initialised:
         log.info("initialising svnsync mirror of %s", remote_root)
         run([tools.svnsync.path, "initialize", mirror_url, remote_root,
-             *_sync_auth_args(source, "source")],
+             *_sync_auth_args(source, tools, "initialize", "source")],
             timeout=600, cancel=cancel, secrets=[source.password],
             remedy="svnsync initialize failed. The mirror must be empty and its "
                    "pre-revprop-change hook must exit 0 (this tool installs one).")
@@ -320,7 +351,8 @@ def _svnsync(source: SourceConfig, tools: ToolSet, repo: Path, remote_root: str,
             if on_progress and head:
                 on_progress(min(1.0, rev / head), f"mirrored r{rev:,} of r{head:,}")
 
-    run([tools.svnsync.path, "synchronize", mirror_url, *_sync_auth_args(source, "source")],
+    run([tools.svnsync.path, "synchronize", mirror_url,
+         *_sync_auth_args(source, tools, "synchronize", "source")],
         timeout=None, cancel=cancel, secrets=[source.password],
         on_stdout=watch, collect_stdout=False,
         remedy="svnsync synchronize failed. It is safe to re-run - the mirror resumes from "
@@ -350,8 +382,7 @@ def _svnrdump(source: SourceConfig, tools: ToolSet, repo: Path, remote_root: str
     if source.password:
         dump_args += ["--password", source.password]
     if source.trust_server_cert:
-        dump_args.append("--trust-server-cert-failures=unknown-ca,cn-mismatch,expired,"
-                         "not-yet-valid,other")
+        dump_args += _trust_args(tools.svnrdump.path, "dump")
 
     load_args = [tools.svnadmin.path, "load", str(repo), "--quiet"]
     progress_re = re.compile(r"[*<] Dumped revision (\d+)")
