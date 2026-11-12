@@ -7,8 +7,9 @@
     (if Inno Setup is present) produces svn2gitlab-setup-<version>.exe in dist\.
 
     Run this on the same Windows major version you intend to deploy to. A binary
-    frozen on Windows 11 generally runs on Server 2019, but the reverse is not
-    guaranteed, and the client's platform is Server 2019.
+    frozen on a newer Windows generally runs on an older one, but the reverse is
+    not guaranteed. The oldest supported target is Windows Server 2016
+    (build 10.0.14393); build on something no newer than you must.
 
 .PARAMETER Vendor
     Optional path to a folder containing `git\` and `svn\` subfolders to embed in the

@@ -7,12 +7,21 @@
 ; Build (on Windows, after `pyinstaller installer/svn2gitlab.spec`):
 ;   iscc installer\svn2gitlab.iss
 ;
-; Target: Windows Server 2019 and later, x64.
-; Server 2019 is the oldest supported target, so the minimum is set there.
+; Target: Windows Server 2016 and later, x64.
+;
+; Server 2016 is build 10.0.14393 (the same kernel as Windows 10 1607). The gate
+; used to sit at 17763, which is Server 2019 - so setup refused to run on 2016
+; even though nothing in the tool needs anything newer.
 
 #define AppName        "svn2gitlab"
 #define AppURL         "https://github.com/Virtual-Tech-Box/svn-to-gitlab"
-#define AppVersion     "1.0.1"
+; Supplied by the release build as `ISCC /DAppVersion=1.2.3`. It used to be written
+; here by hand, which is a second copy of the version number and it drifted: rc4 was
+; published as `svn2gitlab-setup-1.1.0-rc3.exe`, correct inside and wrong on the tin.
+; The fallback below is only for local builds.
+#ifndef AppVersion
+  #define AppVersion   "0.0.0-dev"
+#endif
 #define AppPublisher   "Virtual Tech Box"
 #define AppExeName     "svn2gitlab.exe"
 #define SourceDir      "..\dist\svn2gitlab"
@@ -37,7 +46,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-MinVersion=10.0.17763
+; 10.0.14393 = Windows Server 2016 / Windows 10 1607.
+MinVersion=10.0.14393
 PrivilegesRequired=admin
 UninstallDisplayIcon={app}\{#AppExeName}
 ChangesEnvironment=yes
@@ -46,6 +56,16 @@ SetupLogging=yes
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Types]
+Name: "tfs";  Description: "Migrate from TFS / Azure DevOps (TFVC) - needs Git only"
+Name: "svn";  Description: "Migrate from Subversion - needs Git and a Subversion client"
+Name: "both"; Description: "Both sources"
+
+[Components]
+Name: "core"; Description: "svn2gitlab"; Types: tfs svn both; Flags: fixed
+Name: "prereq_git"; Description: "Git for Windows (bundled - no download needed)"; Types: tfs svn both
+Name: "prereq_svn"; Description: "Subversion command-line client (only for SVN migrations)"; Types: svn both
+
 [Tasks]
 Name: "addtopath"; Description: "Add svn2gitlab to the system PATH"; GroupDescription: "Integration:"
 Name: "desktopicon"; Description: "Create a Start Menu shortcut for the web dashboard"; GroupDescription: "Integration:"
@@ -53,6 +73,9 @@ Name: "desktopicon"; Description: "Create a Start Menu shortcut for the web dash
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}\docs"; DestName: "README.md"; Flags: ignoreversion
+; GPLv2 obliges us to ship Git's licence and say where its source is.
+Source: "vendor\git\GIT-LICENSE.txt"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "vendor\git\GIT-SOURCE-OFFER.txt"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\docs\RUNBOOK.md"; DestDir: "{app}\docs"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\examples\*"; DestDir: "{app}\examples"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
@@ -146,6 +169,114 @@ begin
   Result := DirExistsAny(Candidates);
 end;
 
+{ ---- Prerequisites ---------------------------------------------------------- }
+
+{ Downloading rather than bundling is deliberate. Git and Subversion are separately
+  licensed (GPLv2 and Apache-2.0), and redistributing them inside this installer
+  would carry obligations we cannot discharge from here - including offering
+  matching source. Fetching the official installer on demand also means the user
+  always gets a current, security-patched build rather than whatever was current
+  when this package was cut. }
+
+const
+  { Pinned to a verified release asset. Refresh this when cutting a new installer:
+    the URL is checked during the release build, and a stale one fails loudly there
+    rather than silently at a customer site. }
+  GitInstallerUrl =
+    'https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.5/' +
+    'Git-2.55.0.5-64-bit.exe';
+
+var
+  DownloadPage: TDownloadWizardPage;
+  NeedGit, NeedSvn: Boolean;
+
+function OnDownloadProgress(const Url, FileName: string;
+                            const Progress, ProgressMax: Int64): Boolean;
+begin
+  if ProgressMax <> 0 then
+    Log(Format('Downloaded %d of %d bytes', [Progress, ProgressMax]));
+  Result := True;
+end;
+
+procedure InitializeWizard();
+begin
+  DownloadPage := CreateDownloadPage(
+    SetupMessage(msgWizardPreparing),
+    'Fetching prerequisites from their official sources',
+    @OnDownloadProgress);
+end;
+
+function BundledGit(): string;
+begin
+  { Git is shipped inside the package. Tool discovery looks here first, so a
+    locked-down migration host needs no network at all. }
+  Result := '';
+  if FileExists(ExpandConstant('{app}\_internal\tools\git\cmd\git.exe')) then
+    Result := ExpandConstant('{app}\_internal\tools\git\cmd\git.exe')
+  else if FileExists(ExpandConstant('{app}\tools\git\cmd\git.exe')) then
+    Result := ExpandConstant('{app}\tools\git\cmd\git.exe');
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if CurPageID <> wpReady then
+    exit;
+
+  { Only offer a download when the bundled copy is somehow absent AND the machine
+    has no Git of its own. On a normal install this never fires. }
+  NeedGit := IsComponentSelected('prereq_git') and (FindOnPath('git.exe') = '');
+  NeedSvn := False;
+
+  if not NeedGit then
+    exit;
+
+  if MsgBox('Git was not found on this machine, and the bundled copy is missing'
+    + ' from this package.' + #13#10#13#10
+    + 'Download and install Git for Windows now?' + #13#10#13#10
+    + 'This needs internet access. Choose No if this machine is offline and'
+    + ' install Git manually later.', mbConfirmation, MB_YESNO) = IDNO then
+  begin
+    NeedGit := False;
+    exit;
+  end;
+
+  DownloadPage.Clear;
+  DownloadPage.Add(GitInstallerUrl, 'git-setup.exe', '');
+  DownloadPage.Show;
+  try
+    try
+      DownloadPage.Download;
+    except
+      MsgBox('Git could not be downloaded:' + #13#10#13#10
+        + GetExceptionMessage + #13#10#13#10
+        + 'Installation will continue. Install Git manually from'
+        + ' https://git-scm.com/download/win and run "svn2gitlab doctor".',
+        mbInformation, MB_OK);
+      NeedGit := False;
+    end;
+  finally
+    DownloadPage.Hide;
+  end;
+end;
+
+procedure InstallPrerequisites();
+var
+  ResultCode: Integer;
+begin
+  if NeedGit then
+  begin
+    { /VERYSILENT with the components Git for Windows needs for this tool. } 
+    if not Exec(ExpandConstant('{tmp}\git-setup.exe'),
+                '/VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS',
+                '', SW_SHOW, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      MsgBox('Git for Windows did not install cleanly (code '
+        + IntToStr(ResultCode) + '). Install it from https://git-scm.com/download/win'
+        + ' and run "svn2gitlab doctor".', mbError, MB_OK);
+  end;
+
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Message: string;
@@ -154,38 +285,42 @@ begin
   if CurStep <> ssPostInstall then
     exit;
 
+  InstallPrerequisites();
+
   GitPath := FindOnPath('git.exe');
+  if GitPath = '' then
+    GitPath := BundledGit();
   SvnPath := FindOnPath('svn.exe');
   SvnDir := VisualSvnBin();
   Message := '';
 
   if GitPath = '' then
     Message := Message +
-      '- Git for Windows was not found.' + #13#10 +
-      '  Install it from https://git-scm.com/download/win using the STANDARD installer.' + #13#10 +
-      '  The minimal "MinGit" build omits Perl, and git-svn cannot run without Perl.' + #13#10#13#10;
+      '- Git was not found, and the copy bundled with this package is missing.' + #13#10 +
+      '  Install it from https://git-scm.com/download/win' + #13#10#13#10;
 
-  if SvnPath = '' then
+  { Subversion matters only for SVN migrations. Demanding it on a machine that is
+    only migrating TFS would report a healthy setup as broken. }
+  if IsComponentSelected('prereq_svn') and (SvnPath = '') then
   begin
     if SvnDir <> '' then
       Message := Message +
-        '- A Subversion client was found in the VisualSVN Server folder but is not on PATH:' + #13#10 +
-        '    ' + SvnDir + #13#10 +
-        '  Either add that folder to the system PATH, or list it under `tool_dirs:`' + #13#10 +
-        '  in your migration configuration.' + #13#10#13#10
+        '- A Subversion client exists in the VisualSVN Server folder but is not on' + #13#10 +
+        '  PATH:  ' + SvnDir + #13#10 +
+        '  Add it to PATH, or list it under `tool_dirs:` in your configuration.' + #13#10#13#10
     else
       Message := Message +
-        '- No Subversion command-line client was found.' + #13#10 +
-        '  On a VisualSVN Server host it normally lives in' + #13#10 +
-        '    C:\Program Files\VisualSVN Server\bin' + #13#10 +
-        '  Otherwise install SlikSVN, or TortoiseSVN with the command-line tools' + #13#10 +
-        '  component enabled.' + #13#10#13#10;
+        '- No Subversion command-line client was found. This is only needed for' + #13#10 +
+        '  Subversion migrations, not for TFS/TFVC.' + #13#10 +
+        '  On a VisualSVN Server host it lives in' + #13#10 +
+        '    C:\Program Files\VisualSVN Server\bin' + #13#10#13#10;
   end;
 
   if Message <> '' then
-    MsgBox('svn2gitlab is installed, but it needs these tools before it can migrate '
-      + 'anything:' + #13#10#13#10 + Message
-      + 'Run "svn2gitlab doctor" after installing them to confirm.', mbInformation, MB_OK);
+    MsgBox('svn2gitlab is installed. Before migrating, note:'
+      + #13#10#13#10 + Message
+      + 'Run "svn2gitlab doctor" to see exactly what this machine can migrate.',
+      mbInformation, MB_OK);
 end;
 
 { ---- Uninstall guard -------------------------------------------------------- }

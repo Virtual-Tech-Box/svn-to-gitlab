@@ -285,3 +285,42 @@ def test_locking_a_non_repository_is_rejected(tmp_path):
     plain.mkdir()
     with pytest.raises(SvnError, match="not a Subversion repository"):
         lock_repository(plain, "nope")
+
+
+@requires_conversion
+def test_a_source_url_below_the_repository_root_migrates_only_that_directory(
+        tmp_path, svn_repo, tools):
+    """The URL names trunk; the dump covers the whole repository, junk included."""
+    url = svn_repo.as_uri()
+    subprocess.run([tools.svn.path, "mkdir", "-q", "--parents", "-m", "junk",
+                    f"{url}/Other/.git", f"{url}/Other/https:/host/svn"], check=True)
+
+    config = tmp_path / "subdir.yaml"
+    config.write_text(f"""
+version: 1
+name: subdir
+workdir: {(tmp_path / 'work-subdir').as_posix()}
+source:
+  url: {url}/trunk
+  local_path: {svn_repo.as_posix()}
+authors:
+  file: {(tmp_path / 'authors-subdir.txt').as_posix()}
+  default_domain: example.com
+  policy: generate
+convert:
+  default_branch: main
+target:
+  gitlab_url: https://gitlab.example.com
+  token: not-a-real-token
+  namespace: testgroup
+  project: subdir
+verify:
+  mode: full
+""", encoding="utf-8")
+
+    pipeline, outcome = run_migration(config)
+    assert outcome.ok, outcome.error
+    tracked = git(pipeline.repo.export_dir, "ls-tree", "-r", "--name-only", "main").split()
+    assert "src/app.py" in tracked
+    assert not [p for p in tracked if p.startswith(("trunk/", "branches/", "tags/", "Other/"))]
+    assert outcome.verification and outcome.verification.ok

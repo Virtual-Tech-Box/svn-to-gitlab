@@ -28,7 +28,7 @@ from ..svn.authors import AuthorMap
 from ..tools import ToolSet
 from .git import Git
 from .mirrorfmt import SVN_PREFIX, FetchResult
-from .native import NativeConverter, dump_command
+from .native import OUTSIDE_REF, NativeConverter, dump_command
 
 log = get_logger("engine")
 
@@ -52,6 +52,7 @@ class NativeMirror:
         authors: AuthorMap,
         uuid: str = "",
         cancel: Optional[Event] = None,
+        root: str = "",
     ) -> None:
         tools.require("git", "svnadmin")
         self.tools = tools
@@ -65,6 +66,8 @@ class NativeMirror:
         self.authors = authors
         self.uuid = uuid
         self.cancel = cancel
+        # The migrated directory within the repository; "" migrates all of it.
+        self.root = root
         self.authors_file: Optional[Path] = None
         self._converter: Optional[NativeConverter] = None
 
@@ -88,7 +91,9 @@ class NativeMirror:
     def last_fetched_revision(self) -> int:
         from .mirrorfmt import extract_svn_revision
         best = 0
-        for ref in self.git.list_refs(f"refs/remotes/{SVN_PREFIX}"):
+        # The outside ref counts too: the newest revisions may touch nothing else.
+        refs = self.git.list_refs(f"refs/remotes/{SVN_PREFIX}") + self.git.list_refs(OUTSIDE_REF)
+        for ref in refs:
             meta = self.git.commit_meta(ref.sha)
             rev = extract_svn_revision(meta.get("message", "")) or 0
             best = max(best, rev)
@@ -183,6 +188,8 @@ class NativeMirror:
             default_domain="localhost",
             svn_url=self.source.url or self.source_url,
             uuid=self.uuid,
+            ignore_paths=self.source.layout.ignore_paths,
+            root=self.root,
         )
         # Resuming: seed the converter with the refs already present so new commits
         # attach to existing history instead of starting fresh roots.
@@ -241,6 +248,9 @@ class NativeMirror:
             revisions_fetched=native_result.revisions,
             last_revision=native_result.last_revision,
             duration=native_result.duration,
+            renamed_paths=list(native_result.renamed_paths),
+            unresolved_copies=list(native_result.unresolved_copies),
+            ignored_paths=native_result.ignored_paths,
         )
         result.refs = self.remote_refs()
         result.head_sha = self.git.rev_parse(self.trunk_ref) or ""
@@ -259,6 +269,7 @@ def build_mirror(
     local_repo: Optional[Path],
     uuid: str = "",
     cancel: Optional[Event] = None,
+    root: str = "",
 ):
     """Construct the mirror for this repository."""
     if True:
@@ -272,7 +283,7 @@ def build_mirror(
         mirror = NativeMirror(
             tools=tools, repo_dir=repo_dir, source_url=source_url, layout=layout,
             convert=convert, source=source, local_repo=local_repo, authors=authors,
-            uuid=uuid, cancel=cancel,
+            uuid=uuid, cancel=cancel, root=root,
         )
         mirror.authors_file = authors_file
         return mirror
