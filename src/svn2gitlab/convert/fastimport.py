@@ -115,9 +115,9 @@ class FastImport:
             raise ConversionError(
                 f"git fast-import failed (exit {returncode})"
                 + (f"\n    {detail}" if detail else ""),
-                "This usually means the generated stream was malformed. Re-run with "
-                "`convert.engine: git-svn` to fall back to the reference converter, "
-                "and please report the repository shape that triggered it.",
+                "This usually means the generated stream was malformed. Please report "
+                "the repository shape that triggered it, with the crash report "
+                f"(fast_import_crash_<pid>) from {self.repo / '.git'}.",
             )
         self._proc = None
 
@@ -128,11 +128,31 @@ class FastImport:
             raise ConversionError("fast-import is not running")
         try:
             self._proc.stdin.write(data)
-        except BrokenPipeError:
-            detail = "\n    ".join(self._stderr[-15:])
-            raise ConversionError(
-                "git fast-import closed the stream unexpectedly"
-                + (f"\n    {detail}" if detail else ""))
+        except OSError:
+            # BrokenPipeError on POSIX; Windows reports a write to a dead pipe as
+            # EINVAL ("[Errno 22] Invalid argument"), which used to hide the cause.
+            raise self._exited()
+
+    def _exited(self) -> ConversionError:
+        """fast-import has died: wait for its last words so the error names the cause.
+
+        Writes are buffered, so whatever we were doing when we noticed is rarely what
+        fast-import objected to. Its own `fatal:` line is the only reliable account.
+        """
+        if self._proc:
+            try:
+                self._proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        if self._stderr_thread:
+            self._stderr_thread.join(timeout=10)
+        detail = "\n    ".join(self._stderr[-15:])
+        return ConversionError(
+            "git fast-import exited unexpectedly"
+            + (f"\n    {detail}" if detail else ""),
+            "The `fatal:` line above is Git's reason. fast-import also leaves a crash "
+            f"report in {self.repo / '.git'} (fast_import_crash_<pid>).",
+        )
 
     def next_mark(self) -> int:
         self._mark += 1
@@ -213,14 +233,14 @@ class FastImport:
             raise ConversionError("fast-import is not running")
         query = f"ls {commit} ".encode("ascii") + _quote_path(path) + b"\n"
         self._write(query)
-        self._proc.stdin.flush()  # type: ignore[union-attr]
+        try:
+            self._proc.stdin.flush()  # type: ignore[union-attr]
+        except OSError:
+            raise self._exited()
 
         line = self._proc.stdout.readline()
         if not line:
-            detail = "\n    ".join(self._stderr[-15:])
-            raise ConversionError(
-                "fast-import stopped responding while resolving a copy"
-                + (f"\n    {detail}" if detail else ""))
+            raise self._exited()
         text = line.decode("utf-8", "surrogateescape").rstrip("\n")
         if text.startswith("missing"):
             return LsResult(mode="", kind="missing", dataref="")

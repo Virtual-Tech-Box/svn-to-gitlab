@@ -52,6 +52,7 @@ class NativeMirror:
         authors: AuthorMap,
         uuid: str = "",
         cancel: Optional[Event] = None,
+        root: str = "",
     ) -> None:
         tools.require("git", "svnadmin")
         self.tools = tools
@@ -65,6 +66,8 @@ class NativeMirror:
         self.authors = authors
         self.uuid = uuid
         self.cancel = cancel
+        # The migrated folder's path inside the repository; the dump covers it all.
+        self.root = root
         self.authors_file: Optional[Path] = None
         self._converter: Optional[NativeConverter] = None
 
@@ -184,6 +187,7 @@ class NativeMirror:
             svn_url=self.source.url or self.source_url,
             uuid=self.uuid,
             ignore_paths=self.source.layout.ignore_paths,
+            root=self.root,
         )
         # Resuming: seed the converter with the refs already present so new commits
         # attach to existing history instead of starting fresh roots.
@@ -262,6 +266,7 @@ def build_mirror(
     local_repo: Optional[Path],
     uuid: str = "",
     cancel: Optional[Event] = None,
+    root: str = "",
 ):
     """Construct the mirror for this repository."""
     if True:
@@ -275,7 +280,7 @@ def build_mirror(
         mirror = NativeMirror(
             tools=tools, repo_dir=repo_dir, source_url=source_url, layout=layout,
             convert=convert, source=source, local_repo=local_repo, authors=authors,
-            uuid=uuid, cancel=cancel,
+            uuid=uuid, cancel=cancel, root=root,
         )
         mirror.authors_file = authors_file
         return mirror

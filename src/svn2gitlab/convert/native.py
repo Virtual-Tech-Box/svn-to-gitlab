@@ -19,8 +19,12 @@ Fidelity notes, because they are the whole point:
 * `svn:executable` becomes mode 100755, `svn:special` becomes a symlink;
 * directory copies (branch and tag creation) are resolved through fast-import's `ls`
   so a branch of 30,000 files costs one line, not 30,000;
-* a copy whose source lies outside the migrated subtree degrades to an explicit
-  add of whatever the dump does carry, and is reported rather than silently dropped;
+* when the URL is a folder inside the repository, only that folder is published,
+  but the rest of the repository is still converted onto a ref that is never
+  published (`OUTSIDE_REF`), so a copy into the folder from elsewhere - `svn mv`
+  of a parent, or a file copied in from another project - keeps its content;
+* a copy whose source cannot be found at all degrades to an explicit add of
+  whatever the dump does carry, and is reported rather than silently dropped;
 * a path Git cannot store (see `portable_path`) is renamed, consistently for its
   copies and deletions too, and reported.
 """
@@ -48,6 +52,9 @@ from .mirrorfmt import SVN_PREFIX, escape_ref_name, unescape_ref_name
 log = get_logger("native")
 
 TRUNK_BRANCH = "\x00trunk"      # internal sentinel, never a real ref name
+OUTSIDE_KEY = "\x00outside"    # internal key for the repository outside the folder
+# Never under refs/remotes/svn/, so neither the export stage nor push ever sees it.
+OUTSIDE_REF = "refs/svn2gitlab/outside"
 
 
 @dataclass
@@ -95,9 +102,14 @@ class NativeResult:
 class LayoutMapper:
     """Classifies SVN paths against the detected layout."""
 
-    def __init__(self, layout: DetectedLayout, default_branch: str) -> None:
+    def __init__(self, layout: DetectedLayout, default_branch: str, root: str = "") -> None:
         self.layout = layout
         self.default_branch = default_branch
+        # Where the migrated URL sits inside the repository. The dump names every path
+        # from the repository root while the layout is relative to the URL, so
+        # `Project/app/trunk/x` must become `trunk/x`, and everything else in a shared
+        # repository is outside the migration.
+        self.root = root.strip("/")
         self.trunk = (layout.trunk or "").strip("/")
         self.flat = layout.mode == LayoutMode.FLAT or self.trunk in ("", ".")
         self.branch_roots = [p.rstrip("/*").strip("/") for p in layout.branches if p]
@@ -107,6 +119,14 @@ class LayoutMapper:
 
     def classify(self, path: str) -> PathClass:
         path = path.strip("/")
+
+        if self.root:
+            if path == self.root:
+                path = ""
+            elif path.startswith(self.root + "/"):
+                path = path[len(self.root) + 1:]
+            else:
+                return PathClass(kind="outside")
 
         if self.flat:
             return PathClass(kind="branch", name="", subpath=path,
@@ -154,6 +174,8 @@ class LayoutMapper:
 
     def ref_for(self, cls: PathClass) -> str:
         """The internal branch key a path belongs to."""
+        if cls.kind == "outside":
+            return OUTSIDE_KEY
         if cls.kind == "tag":
             return f"tag:{cls.name}"
         return cls.name or TRUNK_BRANCH
@@ -176,10 +198,11 @@ class NativeConverter:
         uuid: str = "",
         emit_svn_id: bool = True,
         ignore_paths: Optional[str] = None,
+        root: str = "",
     ) -> None:
         self.git_exe = git_exe
         self.repo_dir = Path(repo_dir)
-        self.mapper = LayoutMapper(layout, convert.default_branch)
+        self.mapper = LayoutMapper(layout, convert.default_branch, root=root)
         self.convert = convert
         self.authors = authors
         self.env = env
@@ -206,6 +229,7 @@ class NativeConverter:
         self.deleted_refs: set = set()
         self._renames_seen: set = set()
         self.result = NativeResult()
+        self._revision = 0                  # the revision being converted, for reports
 
     # -- identity ------------------------------------------------------------
 
@@ -227,6 +251,8 @@ class NativeConverter:
         """
         if key == TRUNK_BRANCH:
             return f"refs/remotes/{SVN_PREFIX}trunk"
+        if key == OUTSIDE_KEY:
+            return OUTSIDE_REF
         if key.startswith("tag:"):
             return f"refs/remotes/{SVN_PREFIX}{self.tags_path}/{escape_ref_name(key[4:])}"
         return f"refs/remotes/{SVN_PREFIX}{escape_ref_name(key)}"
@@ -276,13 +302,23 @@ class NativeConverter:
                 break
         return best
 
+    def _outside(self, svn_path: str) -> PathClass:
+        """Where `svn_path` lives on the unpublished ref: its full repository path."""
+        return PathClass(kind="outside",
+                         subpath=portable_path(svn_path.strip("/"), windows=self.windows))
+
     def _resolve_copy(self, importer: FastImport, node: Node,
                       destination: PathClass) -> Optional[Tuple[str, str]]:
         """Return `(mode, dataref)` for a copied path, or None if unresolvable."""
         source = self._classify(node.copyfrom_path or "")
-        if source.kind == "outside":
-            return None
-        source_key = self.mapper.ref_for(source)
+        if source.kind == "outside" or destination.kind == "outside":
+            # Only a folder migration keeps the rest of the repository, and there it
+            # holds every path, so the unpublished ref answers for any source.
+            if not self.mapper.root:
+                return None
+            source_key, source = OUTSIDE_KEY, self._outside(node.copyfrom_path or "")
+        else:
+            source_key = self.mapper.ref_for(source)
         source_mark = self._head_at(source_key, node.copyfrom_rev or 0)
         if source_mark is None:
             return None
@@ -298,8 +334,6 @@ class NativeConverter:
         Without this, a second conversion pass would start every branch from scratch
         and orphan the history the first pass produced.
         """
-        from .mirrorfmt import extract_svn_revision
-
         prefix = f"refs/remotes/{SVN_PREFIX}"
         tags_prefix = f"{prefix}{self.tags_path}/"
         for ref in git.list_refs(prefix):
@@ -309,12 +343,21 @@ class NativeConverter:
                 key = TRUNK_BRANCH
             else:
                 key = unescape_ref_name(ref.name[len(prefix):])
-            meta = git.commit_meta(ref.sha)
-            revision = extract_svn_revision(meta.get("message", "")) or 0
-            self.heads[key] = ref.sha           # a sha works wherever a mark does
-            self.history.setdefault(key, []).append((revision, ref.sha))
+            self._adopt(git, key, ref.sha)
+        if self.mapper.root:
+            sha = git.rev_parse(OUTSIDE_REF)
+            if sha:
+                self._adopt(git, OUTSIDE_KEY, sha)
         if self.heads:
             log.info("resuming native conversion from %d existing ref(s)", len(self.heads))
+
+    def _adopt(self, git, key: str, sha: str) -> None:
+        from .mirrorfmt import extract_svn_revision
+
+        meta = git.commit_meta(sha)
+        revision = extract_svn_revision(meta.get("message", "")) or 0
+        self.heads[key] = sha               # a sha works wherever a mark does
+        self.history.setdefault(key, []).append((revision, sha))
 
     # -- conversion ----------------------------------------------------------
 
@@ -344,6 +387,11 @@ class NativeConverter:
 
             self._finalise(importer)
         self._record_deleted()
+        if self.result.unresolved_copies:
+            log.warning("%d copied path(s) could not be followed to their source, so "
+                        "their content appears only from the next change that touches "
+                        "them. First: %s", len(self.result.unresolved_copies),
+                        self.result.unresolved_copies[0])
 
         self.result.duration = time.time() - started
         log.info("native conversion: %d revisions -> %d commits, %d branches, %d tags in %.0fs",
@@ -356,10 +404,20 @@ class NativeConverter:
     def _convert_revision(self, importer: FastImport, revision: Revision) -> None:
         # Group this revision's nodes by the Git ref they affect. One SVN revision
         # touching trunk and a branch becomes one commit on each, as git-svn does.
+        self._revision = revision.number
         grouped: Dict[str, List[Tuple[Node, PathClass]]] = {}
-        for node in revision.nodes:
-            if self.ignore and self.ignore.search(node.path.strip("/")):
+        for original in revision.nodes:
+            if self.ignore and self.ignore.search(original.path.strip("/")):
                 self.result.ignored_paths += 1
+                continue
+            if self.mapper.root:
+                # The whole repository goes onto the unpublished ref, so any later
+                # copy into the migrated folder finds its source there.
+                grouped.setdefault(OUTSIDE_KEY, []).append(
+                    (original, self._outside(original.path)))
+            node = self._onto_root(original)
+            if node is None:
+                self.result.skipped_paths += 1
                 continue
             cls = self._classify(node.path, record=True)
             if cls.kind == "outside":
@@ -378,6 +436,25 @@ class NativeConverter:
                 self.deleted_refs.add(key)
                 continue
             self._commit_for_ref(importer, revision, key, entries)
+
+    def _onto_root(self, node: Node) -> Optional[Node]:
+        """Restate a change to a directory *above* the migrated folder.
+
+        Copying or deleting a parent (`svn mv Old Project`) changes the migrated folder
+        without the dump ever naming it, so turn it into the equivalent change to the
+        folder itself. Any other change above it is outside the migration.
+        """
+        root = self.mapper.root
+        if not root or not (node.path == "" or root.startswith(node.path + "/")):
+            return node
+        if node.action == ACTION_DELETE:
+            return Node(path=root, action=ACTION_DELETE)
+        if node.is_copy:
+            rest = root[len(node.path):].strip("/")
+            return Node(path=root, action=node.action, kind="dir",
+                        copyfrom_rev=node.copyfrom_rev,
+                        copyfrom_path=f"{node.copyfrom_path}/{rest}".strip("/"))
+        return None
 
     def _commit_for_ref(self, importer: FastImport, revision: Revision, key: str,
                         entries: List[Tuple[Node, PathClass]]) -> None:
@@ -399,7 +476,14 @@ class NativeConverter:
         # The same `git-svn-id:` trailer git-svn writes. Everything downstream - the
         # message filter, the revision lookup, the incremental sync - keys off this,
         # so emitting it is what makes the two engines interchangeable.
-        if self.emit_svn_id:
+        if key == OUTSIDE_KEY:
+            # Never published; the trailer is only how a resumed run finds where
+            # this ref stood at each revision, so it is written even when the
+            # published history omits it.
+            message = (f"svn2gitlab: repository outside the migrated folder\n\n"
+                       f"git-svn-id: {self.svn_url or 'svn'}@{revision.number} "
+                       f"{self.uuid or 'unknown'}").encode("utf-8")
+        elif self.emit_svn_id:
             branch_path = self._svn_path_for(key_path)
             url = f"{self.svn_url.rstrip('/')}/{branch_path}" if branch_path else self.svn_url
             trailer = f"git-svn-id: {url}@{revision.number} {self.uuid}".encode("utf-8")
@@ -436,6 +520,8 @@ class NativeConverter:
 
         self.heads[key] = mark
         self.history.setdefault(key, []).append((revision.number, mark))
+        if key == OUTSIDE_KEY:
+            return
         self.result.commits += 1
         if key.startswith("tag:"):
             self.result.tags[key[4:]] = f":{mark}"
@@ -505,9 +591,12 @@ class NativeConverter:
                 return
             if node.copyfrom_path:
                 self.result.unresolved_copies.append(
-                    f"r?: {node.path} <- {node.copyfrom_path}@{node.copyfrom_rev}")
+                    f"r{self._revision}: {node.path} <- "
+                    f"{node.copyfrom_path}@{node.copyfrom_rev}")
 
         if node.is_dir:
+            if cls.kind == "outside":
+                return                  # never published, so its svn:ignore is moot
             ignore = node.properties.get("svn:ignore")
             if ignore is not None:
                 text = ignore.decode("utf-8", "replace").strip()
