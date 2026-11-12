@@ -346,6 +346,27 @@ def render_html(manifest: MigrationManifest) -> str:
                          f'<td><code>{_e(value)}</code></td></tr>')
         parts.append("</tbody></table></div>")
 
+    renamed = manifest.conversion.get("renamed_paths") or []
+    if renamed:
+        parts.append("<h2>Renamed paths</h2>")
+        parts.append("<p>Git cannot store these Subversion names, so each offending "
+                     "character was percent-encoded. The content is unchanged.</p>")
+        parts.append('<div class="scroll"><table><thead><tr><th>Subversion</th>'
+                     "<th>Git</th></tr></thead><tbody>")
+        for entry in renamed:
+            old, _, new = str(entry).partition(" -> ")
+            parts.append(f"<tr><td><code>{_e(old)}</code></td>"
+                         f"<td><code>{_e(new)}</code></td></tr>")
+        parts.append("</tbody></table></div>")
+
+    unresolved = manifest.conversion.get("unresolved_copies") or []
+    if unresolved:
+        parts.append("<h2>Copies without content</h2>")
+        parts.append("<p>These were copied in Subversion from a source the conversion "
+                     "could not find, so whatever they copied is missing in Git.</p>")
+        parts.append("<ul>" + "".join(f"<li><code>{_e(entry)}</code></li>"
+                                      for entry in unresolved) + "</ul>")
+
     # Stage timings
     if manifest.stages:
         parts.append("<h2>Stages</h2><div class=\"scroll\"><table><thead><tr><th>Stage</th>"

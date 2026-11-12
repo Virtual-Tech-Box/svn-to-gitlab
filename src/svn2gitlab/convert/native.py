@@ -22,7 +22,11 @@ Fidelity notes, because they are the whole point:
 * a copy whose source lies outside the migrated subtree degrades to an explicit
   add of whatever the dump does carry, and is reported rather than silently dropped;
 * a path Git cannot store (see `portable_path`) is renamed, consistently for its
-  copies and deletions too, and reported.
+  copies and deletions too, and reported;
+* when only part of the repository is migrated, the dump still covers all of it.
+  Everything outside that part is written to an unpublished ref (`OUTSIDE_REF`)
+  purely so that copies from it resolve - a project moved into place with `svn mv`
+  would otherwise arrive empty.
 """
 
 from __future__ import annotations
@@ -48,13 +52,16 @@ from .mirrorfmt import SVN_PREFIX, escape_ref_name, unescape_ref_name
 log = get_logger("native")
 
 TRUNK_BRANCH = "\x00trunk"      # internal sentinel, never a real ref name
+OUTSIDE_KEY = "\x00outside"    # paths outside the migrated part of the repository
+# Kept out of `refs/remotes/svn/*`, so the export stage never publishes it.
+OUTSIDE_REF = "refs/svn2gitlab/outside"
 
 
 @dataclass
 class PathClass:
     """Where an SVN path lands in Git."""
 
-    kind: str                # "branch" | "tag" | "outside"
+    kind: str                # "branch" | "tag" | "outside" | "elsewhere" (outside the root)
     name: str = ""           # branch or tag name ("" for trunk => default branch)
     subpath: str = ""        # path within the branch
     is_root: bool = False    # the path *is* the branch root (a copy creates it)
@@ -176,6 +183,7 @@ class NativeConverter:
         uuid: str = "",
         emit_svn_id: bool = True,
         ignore_paths: Optional[str] = None,
+        root: str = "",
     ) -> None:
         self.git_exe = git_exe
         self.repo_dir = Path(repo_dir)
@@ -188,6 +196,9 @@ class NativeConverter:
         self.svn_url = svn_url
         self.uuid = uuid
         self.emit_svn_id = bool(emit_svn_id and svn_url and uuid)
+        # The migrated directory within the repository (`proj/trunk`), or "" for all
+        # of it. Dump paths are repository-relative; the layout is relative to this.
+        self.root = root.strip("/")
         # `source.layout.ignore_paths`, matched against repository-relative paths.
         self.ignore = re.compile(ignore_paths) if ignore_paths else None
         # Which host's path rules to apply; Git for Windows is the stricter one.
@@ -227,6 +238,8 @@ class NativeConverter:
         """
         if key == TRUNK_BRANCH:
             return f"refs/remotes/{SVN_PREFIX}trunk"
+        if key == OUTSIDE_KEY:
+            return OUTSIDE_REF
         if key.startswith("tag:"):
             return f"refs/remotes/{SVN_PREFIX}{self.tags_path}/{escape_ref_name(key[4:])}"
         return f"refs/remotes/{SVN_PREFIX}{escape_ref_name(key)}"
@@ -239,12 +252,17 @@ class NativeConverter:
         Copy sources go through here too, so a copy *from* a renamed path finds the
         content where it was actually written.
         """
-        cls = self.mapper.classify(svn_path)
+        path = svn_path.strip("/")
+        if self.root and path != self.root and not path.startswith(self.root + "/"):
+            cls = PathClass(kind="elsewhere", subpath=path)
+        else:
+            cls = self.mapper.classify(path[len(self.root):])
         if cls.kind == "outside" or not cls.subpath:
             return cls
         portable = portable_path(cls.subpath, windows=self.windows)
         if portable != cls.subpath:
-            if record:
+            # Content outside the root is never published, so not worth reporting.
+            if record and cls.kind != "elsewhere":
                 self._record_rename(svn_path.strip("/"), cls.subpath, portable)
             cls.subpath = portable
         return cls
@@ -255,11 +273,34 @@ class NativeConverter:
         depth = next(i for i, (a, b) in enumerate(zip(old_parts, new_parts)) if a != b) + 1
         prefix = svn_path[:len(svn_path) - len(subpath)]
         entry = (f"{prefix}{'/'.join(old_parts[:depth])} -> "
-                 f"{'/'.join(new_parts[:depth])}")
+                 f"{prefix}{'/'.join(new_parts[:depth])}")
         if entry not in self._renames_seen:
             self._renames_seen.add(entry)
             self.result.renamed_paths.append(entry)
             log.warning("renamed a path Git cannot store: %s", entry)
+
+    def _key_for(self, cls: PathClass) -> str:
+        return OUTSIDE_KEY if cls.kind == "elsewhere" else self.mapper.ref_for(cls)
+
+    def _root_nodes(self, node: Node) -> List[Node]:
+        """What a change to a directory *above* the root does to the root itself.
+
+        Copying or deleting a parent copies or deletes everything under it, but the
+        dump records only the parent. Moving a whole project into place is the common
+        case, and without this the migrated directory would never come into being.
+        """
+        path = node.path.strip("/")
+        if not self.root or not (path == "" or self.root.startswith(path + "/")):
+            return []
+        nodes: List[Node] = []
+        if node.action in (ACTION_DELETE, ACTION_REPLACE):
+            nodes.append(Node(path=self.root, action=ACTION_DELETE))
+        if node.action in (ACTION_ADD, ACTION_REPLACE) and node.is_copy:
+            suffix = self.root[len(path):].strip("/")
+            nodes.append(Node(path=self.root, action=ACTION_ADD, kind="dir",
+                              copyfrom_rev=node.copyfrom_rev,
+                              copyfrom_path=f"{node.copyfrom_path}/{suffix}".strip("/")))
+        return nodes
 
     # -- copy resolution -----------------------------------------------------
 
@@ -282,7 +323,7 @@ class NativeConverter:
         source = self._classify(node.copyfrom_path or "")
         if source.kind == "outside":
             return None
-        source_key = self.mapper.ref_for(source)
+        source_key = self._key_for(source)
         source_mark = self._head_at(source_key, node.copyfrom_rev or 0)
         if source_mark is None:
             return None
@@ -302,6 +343,11 @@ class NativeConverter:
 
         prefix = f"refs/remotes/{SVN_PREFIX}"
         tags_prefix = f"{prefix}{self.tags_path}/"
+        outside = git.rev_parse(OUTSIDE_REF)
+        if outside:
+            revision = extract_svn_revision(git.commit_meta(outside).get("message", "")) or 0
+            self.heads[OUTSIDE_KEY] = outside
+            self.history.setdefault(OUTSIDE_KEY, []).append((revision, outside))
         for ref in git.list_refs(prefix):
             if ref.name.startswith(tags_prefix):
                 key = f"tag:{unescape_ref_name(ref.name[len(tags_prefix):])}"
@@ -357,7 +403,11 @@ class NativeConverter:
         # Group this revision's nodes by the Git ref they affect. One SVN revision
         # touching trunk and a branch becomes one commit on each, as git-svn does.
         grouped: Dict[str, List[Tuple[Node, PathClass]]] = {}
+        nodes: List[Node] = []
         for node in revision.nodes:
+            nodes.append(node)
+            nodes.extend(self._root_nodes(node))
+        for node in nodes:
             if self.ignore and self.ignore.search(node.path.strip("/")):
                 self.result.ignored_paths += 1
                 continue
@@ -365,7 +415,7 @@ class NativeConverter:
             if cls.kind == "outside":
                 self.result.skipped_paths += 1
                 continue
-            grouped.setdefault(self.mapper.ref_for(cls), []).append((node, cls))
+            grouped.setdefault(self._key_for(cls), []).append((node, cls))
 
         for key, entries in grouped.items():
             if self._is_branch_removal(entries):
@@ -436,6 +486,8 @@ class NativeConverter:
 
         self.heads[key] = mark
         self.history.setdefault(key, []).append((revision.number, mark))
+        if key == OUTSIDE_KEY:
+            return
         self.result.commits += 1
         if key.startswith("tag:"):
             self.result.tags[key[4:]] = f":{mark}"
@@ -448,6 +500,8 @@ class NativeConverter:
         """The Subversion path a branch key came from, for the git-svn-id trailer."""
         if key == TRUNK_BRANCH:
             return self.mapper.trunk
+        if key == OUTSIDE_KEY:
+            return ""
         if key.startswith("tag:"):
             return f"{self.tags_path}/{key[4:]}"
         root = self.mapper.branch_roots[0] if self.mapper.branch_roots else "branches"
@@ -463,8 +517,10 @@ class NativeConverter:
         """If this revision creates the branch by copying, the source commit mark."""
         for node, cls in entries:
             if cls.is_root and node.is_copy and node.copyfrom_path is not None:
-                source = self.mapper.classify(node.copyfrom_path)
-                if source.kind == "outside":
+                source = self._classify(node.copyfrom_path)
+                # A copy from outside the root takes the tree but not the history:
+                # parenting on it would publish every other project's commits.
+                if source.kind in ("outside", "elsewhere"):
                     continue
                 return self._head_at(self.mapper.ref_for(source), node.copyfrom_rev or 0)
         return None
@@ -503,10 +559,12 @@ class NativeConverter:
                 if blob_mark is not None:
                     importer.filemodify(node.mode(), f":{blob_mark}", path)
                 return
-            if node.copyfrom_path:
+            if node.copyfrom_path and cls.kind != "elsewhere":
                 self.result.unresolved_copies.append(
                     f"r?: {node.path} <- {node.copyfrom_path}@{node.copyfrom_rev}")
 
+        if node.is_dir and cls.kind == "elsewhere":
+            return
         if node.is_dir:
             ignore = node.properties.get("svn:ignore")
             if ignore is not None:

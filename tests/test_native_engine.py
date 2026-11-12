@@ -490,6 +490,26 @@ def test_a_committed_git_directory_is_renamed_on_every_platform(tmp_path):
     assert result.renamed_paths == ["lib/.git -> lib/%2Egit"]
 
 
+@pytest.mark.parametrize("windows", [False, True])
+def test_a_nested_git_directory_survives_edits_and_deletion(tmp_path, windows):
+    """The client's shape: a working copy's `.git` committed deep inside a project,
+    later touched again and removed (1.0.1 died here with `[Errno 22]`)."""
+    base = "ITFS/BiddingPortal_2.0/BiddingPortal"
+    data = _dump(
+        [("ITFS", "dir", "add", {}), ("ITFS/BiddingPortal_2.0", "dir", "add", {}),
+         (base, "dir", "add", {}), (f"{base}/pom.xml", "file", "add", {"text": b"p\n"}),
+         (f"{base}/.git", "dir", "add", {}),
+         (f"{base}/.git/COMMIT_EDITMSG", "file", "add", {"text": b"one\n"})],
+        [(f"{base}/.git/COMMIT_EDITMSG", "file", "change", {"text": b"two\n"})],
+        [(f"{base}/.git", "", "delete", {})],
+    )
+    target, result = _convert_dump(tmp_path, data, FLAT, windows=windows)
+    assert git(target, "show", f"refs/remotes/svn/trunk~1:{base}/%2Egit/COMMIT_EDITMSG") == "two"
+    assert git(target, "ls-tree", "-r", "--name-only",
+               "refs/remotes/svn/trunk") == f"{base}/pom.xml"
+    assert result.renamed_paths == [f"{base}/.git -> {base}/%2Egit"]
+
+
 def test_a_branch_named_like_a_url_gets_a_valid_ref(tmp_path):
     layout = DetectedLayout(mode=LayoutMode.STANDARD, trunk="trunk",
                             branches=["branches"], tags=["tags"])
@@ -501,3 +521,69 @@ def test_a_branch_named_like_a_url_gets_a_valid_ref(tmp_path):
     target, result = _convert_dump(tmp_path, data, layout, windows=False)
     assert "refs/remotes/svn/https%3A" in git(target, "for-each-ref", "--format=%(refname)")
     assert "https:" in result.branches
+
+
+# --------------------------------------------------------------------------- #
+# Migrating one directory of a larger repository
+# --------------------------------------------------------------------------- #
+
+def _convert_root(tmp_path, data, root):
+    target = tmp_path / "native"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(target)], check=True)
+    converter = NativeConverter(
+        git_exe="git", repo_dir=target, layout=FLAT,
+        convert=ConvertConfig(default_branch="main"), authors=author_map(),
+        emit_svn_id=False, root=root,
+    )
+    return target, converter.convert_stream(io.BytesIO(data))
+
+
+def test_only_the_configured_directory_is_converted(tmp_path):
+    """Other projects in the same repository must neither be published nor crash it."""
+    data = _dump(
+        [("cms", "dir", "add", {}), ("cms/main", "dir", "add", {}),
+         ("cms/main/app.py", "file", "add", {"text": b"app\n"}),
+         ("ITFS", "dir", "add", {}), ("ITFS/.git", "dir", "add", {}),
+         ("ITFS/.git/COMMIT_EDITMSG", "file", "add", {"text": b"x\n"}),
+         ("cms/main-old", "dir", "add", {}),
+         ("cms/main-old/stale.py", "file", "add", {"text": b"old\n"})],
+    )
+    target, result = _convert_root(tmp_path, data, "cms/main")
+    assert git(target, "ls-tree", "-r", "--name-only", "refs/remotes/svn/trunk") == "app.py"
+    assert list(result.branches) == ["main"]
+    # Renames elsewhere in the repository are not this migration's business.
+    assert result.renamed_paths == []
+    refs = git(target, "for-each-ref", "--format=%(refname)").splitlines()
+    assert refs == ["refs/remotes/svn/trunk", "refs/svn2gitlab/outside"]
+
+
+def test_a_directory_moved_into_place_keeps_its_content(tmp_path):
+    """`svn mv Old cms` creates cms/main without a single node under it."""
+    data = _dump(
+        [("Old", "dir", "add", {}), ("Old/main", "dir", "add", {}),
+         ("Old/main/app.py", "file", "add", {"text": b"app\n"})],
+        [("cms", "dir", "add", {"copyfrom": ("Old", 1)}), ("Old", "", "delete", {})],
+        [("cms/main/app.py", "file", "change", {"text": b"app v2\n"})],
+    )
+    target, result = _convert_root(tmp_path, data, "cms/main")
+    assert git(target, "show", "refs/remotes/svn/trunk:app.py") == "app v2"
+    assert result.unresolved_copies == []
+    # The tree is taken, but not the other project's commits as ancestors.
+    assert git(target, "rev-list", "--count", "refs/remotes/svn/trunk") == "2"
+
+
+def test_fast_import_failure_reports_gits_own_reason(tmp_path):
+    from svn2gitlab.convert.fastimport import FastImport
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    with pytest.raises(ConversionError) as caught:
+        with FastImport("git", tmp_path) as importer:
+            blob = importer.blob(b"x\n")
+            importer.begin_commit("refs/heads/x", ("a", "a@x", "0 +0000"),
+                                  ("a", "a@x", "0 +0000"), b"m\n")
+            importer.filemodify("100644", f":{blob}", ".git/COMMIT_EDITMSG")
+            importer.end_commit()
+            for _ in range(10_000):      # keep writing until the dead pipe is noticed
+                importer.blob(b"y" * 1024)
+    first_line = str(caught.value).splitlines()[0]
+    assert first_line.startswith("git fast-import failed: fatal: invalid path")

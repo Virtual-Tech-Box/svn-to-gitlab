@@ -9,6 +9,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 
+- **Migrating one directory of a repository converted the whole repository.** With a
+  source URL below the repository root, or `source.subpath`, the dump still covers
+  every project, and the converter never narrowed it: every project landed on the
+  default branch, and junk anywhere in the repository could crash the run. Only the
+  configured directory is converted now. Everything else goes to an unpublished ref
+  so copies from it still resolve, including a parent copy such as a project moved
+  into place with `svn mv`. A source URL below the root was also dropped by the
+  local acquisition strategies, so verification compared against the whole
+  repository; the conversion URL is now rebuilt from the directory's path.
+
+- **A dead `git fast-import` hid its own reason.** On Windows a write to its closed
+  pipe raises `[Errno 22] Invalid argument`, which escaped as a raw Python error; a
+  failed copy lookup reported "stopped responding while resolving a copy". Every
+  failure now waits for fast-import's stderr and leads with Git's `fatal:` line. The
+  HTML report also lists renamed paths and copies whose content could not be found.
+
 - **An SVN path Git cannot store crashed the conversion with `fatal: invalid path`.**
   The usual cause is a URL pasted into a TortoiseSVN "copy to" box, which leaves a
   directory literally named `https:` that Git for Windows refuses; a `.git` folder

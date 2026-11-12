@@ -70,6 +70,8 @@ class FetchResult:
     renamed_paths: List[str] = field(default_factory=list)
     # Nodes left out because they matched `source.layout.ignore_paths`.
     ignored_paths: int = 0
+    # Copies whose source could not be found, so their content is missing.
+    unresolved_copies: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -80,6 +82,7 @@ class FetchResult:
             "ref_count": len(self.refs),
             "renamed_paths": self.renamed_paths[:50],
             "ignored_paths": self.ignored_paths,
+            "unresolved_copies": self.unresolved_copies[:50],
         }
 
 

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import unquote
 
 from .config import (AuthorPolicy, FastPath, MigrationConfig, ResolvedRepo,
                      SourceKind, VerifyMode)
@@ -189,11 +190,43 @@ class MigrationPipeline:
     def convert_url(self) -> str:
         """The URL to convert from - the acquired local copy when we have one."""
         if self._acquisition:
-            return self._acquisition.url
-        stored = self.state.stage_result(self.job_id, "acquire") if self.job_id else None
-        if stored and stored.get("url"):
-            return str(stored["url"])
+            url, local = self._acquisition.url, self._acquisition.local_repo
+        else:
+            stored = (self.state.stage_result(self.job_id, "acquire") if self.job_id
+                      else None) or {}
+            url, local = stored.get("url"), stored.get("local_repo")
+        if local and not self.is_tfvc:
+            # Rebuilt rather than trusted: acquisition only ever appended
+            # `source.subpath`, so a source URL pointing below the repository root
+            # lost its path and verification compared against the whole repository.
+            return url_join(Path(str(local)).as_uri(), self.repository_path())
+        if url:
+            return str(url)
         return self.source_url()
+
+    def repository_path(self) -> str:
+        """Where the migrated directory lives inside its repository, e.g. `proj/trunk`.
+
+        Both a source URL below the repository root and `source.subpath` narrow the
+        migration, and the dump the converter reads always covers the whole
+        repository, so this is what it filters on.
+        """
+        analysis = self.analysis
+        root = unquote(analysis.repository_root or "").rstrip("/")
+        url = unquote(analysis.url or "").rstrip("/")
+        if not root or not url:
+            return (self.repo.source.subpath or "").strip("/")
+        if url.lower() == root.lower():
+            return ""
+        if not url.lower().startswith(root.lower() + "/"):
+            raise ConversionError(
+                f"the source URL {analysis.url} is not inside its repository root "
+                f"{analysis.repository_root}",
+                "Re-run the analysis with `--restart-from analyze`. If it persists, set "
+                "`source.url` to the repository root and `source.subpath` to the "
+                "directory to migrate.",
+            )
+        return url[len(root) + 1:]
 
     @property
     def analysis_path(self) -> Path:
@@ -313,6 +346,7 @@ class MigrationPipeline:
                 local_repo=self.local_repo_path(),
                 uuid=self.analysis.repository_uuid,
                 cancel=self.cancel,
+                root=self.repository_path(),
             )
         return self._mirror
 

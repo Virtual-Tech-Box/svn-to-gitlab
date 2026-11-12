@@ -111,15 +111,33 @@ class FastImport:
         if self._stderr_thread:
             self._stderr_thread.join(timeout=30)
         if returncode != 0 and not abort:
-            detail = "\n    ".join(self._stderr[-15:])
-            raise ConversionError(
-                f"git fast-import failed (exit {returncode})"
-                + (f"\n    {detail}" if detail else ""),
-                "This usually means the generated stream was malformed. Re-run with "
-                "`convert.engine: git-svn` to fall back to the reference converter, "
-                "and please report the repository shape that triggered it.",
-            )
+            raise self._failure()
         self._proc = None
+
+    def _failure(self) -> ConversionError:
+        """The error to raise once fast-import has died, led by Git's own reason.
+
+        A dead fast-import is first noticed by us, not reported by it: the next write
+        fails, or an `ls` gets no answer. Its stderr is still being drained at that
+        point, so wait for the process and the drain to finish - otherwise the message
+        that says *why* (`fatal: invalid path ...`) is missing from the error.
+        """
+        if self._proc:
+            try:
+                self._proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+        if self._stderr_thread:
+            self._stderr_thread.join(timeout=10)
+        fatal = [line for line in self._stderr if line.startswith(("fatal:", "error:"))]
+        headline = fatal[0] if fatal else "git fast-import exited unexpectedly"
+        detail = "\n    ".join(self._stderr[-15:])
+        return ConversionError(
+            f"git fast-import failed: {headline}" + (f"\n    {detail}" if detail else ""),
+            "Git refused part of the converted history; the line above is its reason. "
+            "If it names a path, exclude it with `source.layout.ignore_paths` and "
+            "re-run, and please report the repository shape that triggered it.",
+        )
 
     # -- writing -------------------------------------------------------------
 
@@ -128,11 +146,10 @@ class FastImport:
             raise ConversionError("fast-import is not running")
         try:
             self._proc.stdin.write(data)
-        except BrokenPipeError:
-            detail = "\n    ".join(self._stderr[-15:])
-            raise ConversionError(
-                "git fast-import closed the stream unexpectedly"
-                + (f"\n    {detail}" if detail else ""))
+        except OSError:
+            # BrokenPipeError on Linux and macOS; Windows reports the same dead pipe
+            # as `[Errno 22] Invalid argument`.
+            raise self._failure() from None
 
     def next_mark(self) -> int:
         self._mark += 1
@@ -213,14 +230,14 @@ class FastImport:
             raise ConversionError("fast-import is not running")
         query = f"ls {commit} ".encode("ascii") + _quote_path(path) + b"\n"
         self._write(query)
-        self._proc.stdin.flush()  # type: ignore[union-attr]
+        try:
+            self._proc.stdin.flush()  # type: ignore[union-attr]
+        except OSError:
+            raise self._failure() from None
 
         line = self._proc.stdout.readline()
         if not line:
-            detail = "\n    ".join(self._stderr[-15:])
-            raise ConversionError(
-                "fast-import stopped responding while resolving a copy"
-                + (f"\n    {detail}" if detail else ""))
+            raise self._failure()
         text = line.decode("utf-8", "surrogateescape").rstrip("\n")
         if text.startswith("missing"):
             return LsResult(mode="", kind="missing", dataref="")
@@ -235,7 +252,10 @@ class FastImport:
         """Flush objects so far. Expensive; only needed before external git reads."""
         self._write(b"checkpoint\n")
         if self._proc and self._proc.stdin:
-            self._proc.stdin.flush()
+            try:
+                self._proc.stdin.flush()
+            except OSError:
+                raise self._failure() from None
 
 
 # Characters Git for Windows refuses anywhere in a path (core.protectNTFS).
